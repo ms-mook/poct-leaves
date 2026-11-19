@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ระบบบันทึกการแจ้งลา | หน่วยเจาะเลือดฯ โรงพยาบาลศรีนครินทร์</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <?!= include_('CSS'); ?>
+</head>
+<body>
+<?!= include_('Icons'); ?>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5c3.6 4.3 6 7.5 6 11a6 6 0 0 1-12 0c0-3.5 2.4-6.7 6-11z"/></svg>
+      </span>
+      <div class="brand-text">
+        <h1>หน่วยเจาะเลือดเก็บสิ่งส่งตรวจและ POCT</h1>
+        <p>โรงพยาบาลศรีนครินทร์ ระบบบันทึกการแจ้งลา</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div id="userBar" class="user-bar" hidden>
+        <span class="user-name"><svg class="ic" aria-hidden="true"><use href="#i-user"/></svg><span id="userName"></span></span>
+        <button type="button" id="btnChangePin" class="btn-ghost btn-icon" title="เปลี่ยน PIN" aria-label="เปลี่ยน PIN"><svg class="ic" aria-hidden="true"><use href="#i-key"/></svg></button>
+        <button type="button" id="btnLogout" class="btn-ghost btn-icon danger" title="ออกจากระบบ" aria-label="ออกจากระบบ"><svg class="ic" aria-hidden="true"><use href="#i-logout"/></svg></button>
+      </div>
+      <a class="btn-ghost" href="<?= appUrl ?>?page=Admin" target="_top"><svg class="ic" aria-hidden="true"><use href="#i-shield-check"/></svg><span>ผู้ดูแลระบบ</span></a>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">ระบบบันทึกการแจ้งลา</p>
+    <h2>แจ้งลาออนไลน์ ติดตามสถานะได้ทุกขั้นตอน</h2>
+    <p class="lead">บันทึกใบลาได้หลายช่วงในครั้งเดียว ระบบนับวันทำงานและวันกลับมาทำงานให้อัตโนมัติ</p>
+    <ol class="steps">
+      <li>เลือกชื่อและใส่ PIN</li>
+      <li>กรอกวันที่ลา</li>
+      <li>รอผู้ดูแลอนุมัติ</li>
+    </ol>
+  </div>
+</section>
+
+<main class="wrap main">
+
+  <section id="screenLoading" class="card narrow center">
+    <p id="loadingText">กำลังโหลด...</p>
+    <button type="button" id="btnRetry" class="btn-ghost" hidden><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span>ลองใหม่</span></button>
+  </section>
+
+  <section id="screenLogin" class="card narrow" hidden>
+    <h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-login"/></svg><span>เข้าสู่ระบบเพื่อแจ้งลา</span></h2>
+    <p class="hint">เลือกชื่อของคุณ แล้วใส่ PIN เพื่อเข้าสู่ระบบ</p>
+    <ul class="hint-list">
+      <li><b><svg class="ic" aria-hidden="true"><use href="#i-key"/></svg>เข้าครั้งแรก</b><span>ใช้ PIN ที่ผู้ดูแลแจ้งให้</span></li>
+      <li><b><svg class="ic" aria-hidden="true"><use href="#i-circle-help"/></svg>ลืม PIN</b><span>ติดต่อผู้ดูแลเพื่อรีเซ็ต</span></li>
+    </ul>
+    <form id="loginForm" autocomplete="off">
+      <div class="field">
+        <label for="staffSelect">ชื่อ-นามสกุล</label>
+        <select id="staffSelect" required></select>
+      </div>
+      <div class="field">
+        <label for="pinInput">PIN</label>
+        <input type="password" id="pinInput" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="current-password" required>
+      </div>
+      <p id="loginError" class="error" role="alert"></p>
+      <button type="submit" id="loginBtn" class="btn-primary"><svg class="ic" aria-hidden="true"><use href="#i-login"/></svg><span class="bt">เข้าสู่ระบบ</span></button>
+    </form>
+    <div class="alt">
+      <span>ไม่พบชื่อของคุณในรายการ?</span>
+      <button type="button" id="btnRequest" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-user-plus"/></svg><span>ขอเพิ่มชื่อเข้าระบบ</span></button>
+    </div>
+  </section>
+
+  <section id="screenRequest" class="card narrow" hidden>
+    <h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-user-plus"/></svg><span>ขอเพิ่มชื่อเข้าระบบ</span></h2>
+    <p class="hint">กรอกข้อมูลของคุณ ผู้ดูแลจะตรวจสอบและอนุมัติ จากนั้นจึงเข้าสู่ระบบได้ด้วย PIN ที่ผู้ดูแลแจ้ง</p>
+    <form id="requestForm" autocomplete="off">
+      <div class="field"><label for="reqName">ชื่อ-นามสกุล</label><input type="text" id="reqName" maxlength="80" required></div>
+      <div class="field"><label for="reqPos">ตำแหน่ง</label><select id="reqPos" required></select></div>
+      <div class="field"><label for="reqContact">ข้อมูลติดต่อ (ไม่บังคับ)</label><input type="text" id="reqContact" maxlength="100" placeholder="เบอร์โทรหรือไลน์ ให้ผู้ดูแลใช้ยืนยันตัวตน"></div>
+      <p id="reqError" class="error" role="alert"></p>
+      <div class="row">
+        <button type="button" id="reqBack" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-arrow-left"/></svg><span>กลับ</span></button>
+        <button type="submit" id="reqBtn" class="btn-primary"><svg class="ic" aria-hidden="true"><use href="#i-send"/></svg><span class="bt">ส่งคำขอ</span></button>
+      </div>
+    </form>
+  </section>
+
+  <section id="screenPin" class="card narrow" hidden>
+    <h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-key"/></svg><span id="pinTitle">ตั้ง PIN ใหม่</span></h2>
+    <p class="hint" id="pinHint">PIN เป็นตัวเลข 4-6 หลัก ห้ามเป็นเลขซ้ำหรือเลขเรียงต่อกัน เช่น 1111 หรือ 2345</p>
+    <form id="pinForm" autocomplete="off">
+      <div class="field" id="oldPinWrap">
+        <label for="oldPin">PIN เดิม</label>
+        <input type="password" id="oldPin" inputmode="numeric" maxlength="6" autocomplete="current-password">
+      </div>
+      <div class="field">
+        <label for="newPin">PIN ใหม่</label>
+        <input type="password" id="newPin" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="new-password" required>
+      </div>
+      <div class="field">
+        <label for="newPin2">ยืนยัน PIN ใหม่</label>
+        <input type="password" id="newPin2" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" autocomplete="new-password" required>
+      </div>
+      <p id="pinError" class="error" role="alert"></p>
+      <div class="row">
+        <button type="button" id="pinCancel" class="btn-ghost" hidden><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg><span>ยกเลิก</span></button>
+        <button type="submit" id="pinBtn" class="btn-primary"><svg class="ic" aria-hidden="true"><use href="#i-save"/></svg><span class="bt">บันทึก PIN ใหม่</span></button>
+      </div>
+    </form>
+  </section>
+
+  <div id="screenApp" hidden>
+    <section class="card summary" aria-labelledby="sumTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="sumTitle" class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-chart"/></svg><span>สรุปการลาของฉัน</span></h2>
+          <p class="hint" id="sumHint"></p>
+        </div>
+        <select id="mePeriod" class="period-select" aria-label="ช่วงเวลา"></select>
+      </div>
+      <div id="meTiles" class="tiles"></div>
+    </section>
+    <div class="layout">
+    <section class="card form-panel" aria-labelledby="formTitle">
+      <h2 id="formTitle" class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-file-text"/></svg><span>ฟอร์มแจ้งลา</span></h2>
+      <p class="hint" id="whoAmI"></p>
+      <form id="leaveForm">
+        <div id="entries"></div>
+        <div class="actions">
+          <button type="button" id="btnAdd" class="btn-add"><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg><span>เพิ่มรายการลา</span></button>
+          <button type="submit" id="submitBtn" class="btn-primary"><svg class="ic" aria-hidden="true"><use href="#i-send"/></svg><span class="bt">ส่งใบลา</span></button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card history-panel" aria-labelledby="historyTitle">
+      <div class="panel-head">
+        <div>
+          <h2 id="historyTitle" class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-calendar-days"/></svg><span>ตารางการลา</span></h2>
+          <p class="hint">ดูการลาของทุกคนในหน่วย และติดตามสถานะใบลาของคุณ</p>
+        </div>
+        <button type="button" id="btnRefresh" class="btn-ghost btn-icon" title="รีเฟรชข้อมูล" aria-label="รีเฟรชข้อมูล"><svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+      </div>
+      <div class="tabs" id="viewTabs" role="tablist">
+        <button type="button" class="tab" role="tab" data-view="all" aria-selected="true"><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>การลาทั้งหน่วย</span></button>
+        <button type="button" class="tab" role="tab" data-view="cal" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-calendar-range"/></svg><span>ปฏิทิน</span></button>
+        <button type="button" class="tab" role="tab" data-view="mine" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-user"/></svg><span>ของฉัน</span></button>
+      </div>
+
+      <div id="viewAll">
+        <div class="tbar">
+          <div class="search"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><input type="text" id="aQ" maxlength="50" placeholder="ค้นหาชื่อหรือประเภทการลา" aria-label="ค้นหา"></div>
+          <select id="aStatus" aria-label="สถานะ">
+            <option value="all">ทุกสถานะ</option><option value="Pending">รออนุมัติ</option>
+            <option value="Approve">อนุมัติแล้ว</option><option value="Reject">ไม่อนุมัติ</option>
+          </select>
+          <select id="aSize" aria-label="จำนวนต่อหน้า">
+            <option value="10">10 รายการ</option><option value="25" selected>25 รายการ</option>
+            <option value="50">50 รายการ</option><option value="100">100 รายการ</option>
+          </select>
+        </div>
+        <p class="hint" id="aInfo"></p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>ชื่อ-นามสกุล</th><th>ประเภท</th><th>วันที่ลา</th><th class="c">วัน</th><th class="c">สถานะ</th><th>ส่งเมื่อ</th></tr></thead>
+            <tbody id="allBody"></tbody>
+          </table>
+        </div>
+        <div id="aPager" class="pager"></div>
+      </div>
+
+      <div id="viewCal" hidden>
+        <div class="cal-bar">
+          <button type="button" id="calPrev" class="btn-ghost btn-icon" title="เดือนก่อนหน้า" aria-label="เดือนก่อนหน้า"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
+          <h3 id="calTitle" aria-live="polite"></h3>
+          <button type="button" id="calNext" class="btn-ghost btn-icon" title="เดือนถัดไป" aria-label="เดือนถัดไป"><svg class="ic" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+          <button type="button" id="calToday" class="btn-ghost">เดือนนี้</button>
+        </div>
+        <div class="cal-lg" id="calLegend"></div>
+        <div id="calGrid" class="cal-grid" role="grid" aria-label="ปฏิทินการลาของหน่วย"></div>
+        <div id="calDetail" class="cal-detail" hidden></div>
+        <p class="hint">แสดงใบลาที่อนุมัติแล้วและที่รออนุมัติ (ตัวอักษรเอียงและกรอบประ) · กดที่วันเพื่อดูรายชื่อ</p>
+      </div>
+
+      <div id="viewMine" hidden>
+        <p class="hint">ติดตามสถานะการอนุมัติของคุณ แสดงล่าสุดไม่เกิน 100 รายการ</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>วันที่ลา</th><th>ประเภท</th><th class="c">วัน</th><th class="c">สถานะ</th><th>รายละเอียด</th></tr>
+            </thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    </div>
+  </div>
+
+</main>
+
+<button type="button" id="fabNew" class="fab" hidden><svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg><span>แจ้งลา</span></button>
+
+<footer class="site-footer">
+  <p>พัฒนาโดย <span class="footer-author">ทนพญ. มุกดารัตน์ สุพัฒน์</span></p>
+</footer>
+
+<?!= include_('Javascript'); ?>
+</body>
+</html>

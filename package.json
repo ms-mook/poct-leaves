@@ -1,0 +1,16 @@
+{
+  "name": "poct-leaves",
+  "private": true,
+  "version": "1.0.0",
+  "description": "ระบบบันทึกการแจ้งลา หน่วยเจาะเลือดฯ — ย้ายจาก Google Apps Script + Sheets ไป Supabase + Vercel",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node test/run.mjs",
+    "test:parity": "node test/parity.mjs"
+  },
+  "dependencies": {
+    "postgres": "3.4.5"
+  }
+}

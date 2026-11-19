@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ผู้ดูแลระบบ | ระบบบันทึกการแจ้งลา</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <?!= include_('CSS'); ?>
+  <?!= include_('CSSAdmin'); ?>
+  <style>
+.swt { appearance: none; -webkit-appearance: none; position: relative; flex: none; width: 34px; height: 20px; margin: 0; border: 0; border-radius: 999px; background: #cbd1d8; cursor: pointer; transition: background .22s ease; }
+.swt::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .3); transition: transform .25s cubic-bezier(.3,1.4,.5,1); }
+.swt:checked { background: #0f7a5c; } .swt:checked::after { transform: translateX(14px); }
+.swt:disabled { opacity: .45; cursor: not-allowed; } .swt:focus-visible { outline: 2px solid #0f7a5c; outline-offset: 2px; }
+.sysls { display: grid; grid-auto-flow: column; grid-template-rows: repeat(3, auto); justify-content: start; gap: 4px 22px; text-align: left; }
+.sysrow { display: flex; align-items: center; gap: 7px; font-size: .8rem; white-space: nowrap; line-height: 1.2; cursor: pointer; }
+.sysrow .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #a3abb5; transition: background .2s, box-shadow .2s; }
+.sysrow.on .dot { background: #16a34a; box-shadow: 0 0 0 3px rgb(22 163 74 / .2); }
+.sysrow:not(.on) > span { color: #8a929c; }
+.sysrow .swt { margin-left: 2px; }
+.sysrow.ro { cursor: default; }
+.swfield { display: grid; grid-auto-flow: column; grid-template-rows: repeat(3, auto); justify-content: start; gap: 8px 28px; margin: 4px 0 6px; text-align: left; }
+.swfield .check { display: flex; align-items: center; gap: 9px; margin: 0; cursor: pointer; font-size: .95rem; }
+.swfield .check input { appearance: none; -webkit-appearance: none; position: relative; width: 38px; height: 22px; margin: 0; border: 0; border-radius: 999px; background: #cbd1d8; cursor: pointer; transition: background .22s; flex: none; }
+.swfield .check input::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .3); transition: transform .25s cubic-bezier(.3,1.4,.5,1); }
+.swfield .check input:checked { background: #0f7a5c; } .swfield .check input:checked::after { transform: translateX(16px); }
+.swfield .check input[type=checkbox] { appearance: none; -webkit-appearance: none; width: 38px; height: 22px; min-width: 38px; border: 0; border-radius: 999px; background: #cbd1d8; box-shadow: none; }
+.swfield .check input[type=checkbox]:checked { background: #0f7a5c; }
+
+/* ===== ปฏิทินวันลา (พรีวิว + พิมพ์ PDF) ===== */
+.calpdf { position: fixed; inset: 0; z-index: 90; display: flex; flex-direction: column; background: #efe8e5; }
+.calpdf-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 16px; background: #fff; border-bottom: 1px solid #e6d9d5; box-shadow: 0 2px 10px rgb(60 20 30 / .08); }
+.calpdf-bar label { display: inline; margin: 0; font-size: .85rem; font-weight: 600; color: #5b4f54; }
+.calpdf-bar select { width: auto; min-width: 140px; min-height: 2.25rem; padding: 4px 10px; }
+.calpdf-title { display: flex; align-items: center; gap: 8px; font-weight: 700; color: #5e1121; margin-right: 8px; }
+.calpdf-back { font-weight: 600; } .calpdf-x { flex: none; }
+.calpdf-grow { flex: 1; } .calpdf-tip { font-size: .78rem; color: #8a7e83; }
+.calpdf-go { background: #b3243f !important; border-color: #b3243f !important; color: #fff !important; font-weight: 600; }
+.calpdf-go:hover { background: #8a1a30 !important; }
+.calpdf-scroll { flex: 1; overflow: auto; padding: 18px; }
+.calsheet { --fs: 11px; width: 1062px; margin: 0 auto; padding: 18px 20px 14px; background: #fff; border-radius: 6px; box-shadow: 0 10px 30px -12px rgb(60 20 30 / .35); color: #1f1a1c; font-size: 12px; animation: calIn .35s ease both; }
+@keyframes calIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.calsheet .ch { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 3px solid #b3243f; }
+.calsheet .ch h2 { margin: 0; font-size: 22px; line-height: 1.2; color: #5e1121; font-weight: 700; }
+.calsheet .ch p { margin: 2px 0 0; font-size: 12px; color: #6b5d62; }
+.calsheet .ch .tot { text-align: right; font-size: 12px; color: #6b5d62; }
+.calsheet .lg { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 8px; padding: 6px 8px; border: 1px solid #d9ccc8; border-radius: 6px; background: #fbf8f6; font-size: 12px; }
+.calsheet .lg span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.calsheet .grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-top: 1px solid #b9a9a4; border-left: 1px solid #b9a9a4; }
+.calsheet .dow { padding: 5px 0; text-align: center; font-weight: 700; font-size: 13px; color: #fff; background: #7a1a30; border-right: 1px solid #b9a9a4; border-bottom: 1px solid #b9a9a4; }
+.calsheet .dow.we { background: #4a4a4a; }
+.calsheet .cell { min-height: 76px; padding: 3px 4px 4px; border-right: 1px solid #b9a9a4; border-bottom: 1px solid #b9a9a4; break-inside: avoid; page-break-inside: avoid; }
+.calsheet .cell.blank { background: #f3efed; }
+.calsheet .cell.we { background: #f1eeec; }
+.calsheet .cell .dn { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; font-weight: 700; font-size: 13px; line-height: 1; }
+.calsheet .cell .dn small { font-weight: 600; font-size: 10px; color: #6b5d62; }
+.calsheet .cell.we .dn { color: #555; }
+.calsheet .cell.today .dn b { background: #b3243f; color: #fff; border-radius: 999px; padding: 1px 6px; }
+.calsheet .ppl { display: grid; grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr)); gap: 1px 4px; }
+.calsheet .ce { display: flex; align-items: center; gap: 3px; min-width: 0; font-size: var(--fs); line-height: 1.35; font-weight: 500; white-space: nowrap; overflow: hidden; }
+.calsheet .ce .nm { overflow: hidden; text-overflow: clip; }
+.calsheet .bd { flex: none; display: inline-grid; place-items: center; min-width: 1.35em; height: 1.35em; padding: 0 2px; border: 1.5px solid currentColor; font-size: .82em; font-weight: 800; line-height: 1; }
+.calsheet .bd-V { color: #166534; background: #dcfce7; border-radius: 50%; }
+.calsheet .bd-P { color: #1d4ed8; background: #dbeafe; border-radius: 2px; }
+.calsheet .bd-S { color: #b91c1c; background: #fee2e2; border-radius: 4px; transform: none; border-width: 2px; }
+.calsheet .bd-F { color: #c2410c; background: #ffedd5; border-radius: 2px; border-style: dashed; }
+.calsheet .bd-O { color: #6d28d9; background: #ede9fe; border-radius: 999px; min-width: 1.9em; }
+.calsheet .ce.t-V { background: linear-gradient(90deg, #f0fdf4, transparent); } .calsheet .ce.t-P { background: linear-gradient(90deg, #eff6ff, transparent); }
+.calsheet .ce.t-S { background: linear-gradient(90deg, #fef2f2, transparent); } .calsheet .ce.t-F { background: linear-gradient(90deg, #fff7ed, transparent); }
+.calsheet .ce.t-O { background: linear-gradient(90deg, #f5f3ff, transparent); }
+.calsheet .ft { display: flex; justify-content: space-between; margin-top: 6px; font-size: 10.5px; color: #8a7e83; }
+.calsheet .empty { padding: 30px; text-align: center; color: #8a7e83; }
+  .mrow { display: flex; gap: 8px; } .mrow select { width: auto; flex: 1; min-width: 0; }
+  .lockedtag { display: inline-block; margin-top: 3px; padding: 1px 8px; border-radius: 999px; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 600; }
+@media print {
+  @page { size: A4 landscape; margin: 0; }
+  html, body { height: auto !important; overflow: visible !important; background: #fff !important; }
+  body > *:not(#calPdfModal) { display: none !important; }
+  #calPdfModal { position: static !important; display: block !important; background: #fff !important; padding: 7mm !important; box-sizing: border-box; }
+  .no-print { display: none !important; }
+  .calpdf-scroll { overflow: visible !important; padding: 0 !important; }
+  .calsheet { width: 100% !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; border-radius: 0 !important; animation: none !important; }
+  .calsheet, .calsheet * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<?!= include_('Icons'); ?>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5c3.6 4.3 6 7.5 6 11a6 6 0 0 1-12 0c0-3.5 2.4-6.7 6-11z"/></svg></span>
+      <div class="brand-text"><h1>ผู้ดูแลระบบการแจ้งลา</h1><p>หน่วยเจาะเลือดเก็บสิ่งส่งตรวจและ POCT</p></div>
+    </div>
+    <div class="header-actions">
+      <div id="userBar" class="user-bar" hidden>
+        <span class="user-name"><svg class="ic" aria-hidden="true"><use href="#i-user"/></svg><span id="userName"></span></span>
+        <button type="button" id="btnMyPw" class="btn-ghost btn-icon" title="เปลี่ยนรหัสผ่านของฉัน" aria-label="เปลี่ยนรหัสผ่านของฉัน"><svg class="ic" aria-hidden="true"><use href="#i-key"/></svg></button>
+        <button type="button" id="btnLogout" class="btn-ghost btn-icon danger" title="ออกจากระบบ" aria-label="ออกจากระบบ"><svg class="ic" aria-hidden="true"><use href="#i-logout"/></svg></button>
+      </div>
+      <a class="btn-ghost" href="<?= appUrl ?>" target="_top"><svg class="ic" aria-hidden="true"><use href="#i-arrow-left"/></svg><span>กลับหน้าแจ้งลา</span></a>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">สำหรับผู้ดูแลระบบ</p>
+    <h2>จัดการการแจ้งลา</h2>
+    <p class="lead">อนุมัติใบลา จัดการรายชื่อพนักงานและบัญชีผู้ดูแลระบบ</p>
+  </div>
+</section>
+
+<main class="wrap main">
+
+  <section id="screenLoading" class="card narrow center"><p id="loadingText">กำลังโหลด...</p></section>
+
+  <section id="screenLogin" class="card login-wrap" hidden>
+    <h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-shield-check"/></svg><span>เข้าสู่ระบบผู้ดูแล</span></h2>
+    <form id="loginForm" autocomplete="off">
+      <div class="field"><label for="uName">ชื่อผู้ใช้</label><input type="text" id="uName" autocomplete="username" maxlength="40" required></div>
+      <div class="field"><label for="uPass">รหัสผ่าน</label><input type="password" id="uPass" autocomplete="current-password" maxlength="200" required></div>
+      <p id="loginError" class="error" role="alert"></p>
+      <button type="submit" id="loginBtn" class="btn-primary"><svg class="ic" aria-hidden="true"><use href="#i-login"/></svg><span class="bt">เข้าสู่ระบบ</span></button>
+    </form>
+  </section>
+
+  <div id="screenApp" hidden>
+    <div id="pinWarn" class="warnbox" hidden></div>
+
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="dash" aria-selected="true"><svg class="ic" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>แดชบอร์ด</span></button>
+      <button class="tab" role="tab" data-tab="leaves" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-file-text"/></svg><span>รายการลา</span><span id="badgePending" class="count"></span></button>
+      <button class="tab" role="tab" data-tab="late" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span>มาสาย / ขาดเวร</span></button>
+      <button class="tab" role="tab" data-tab="people" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-clipboard-list"/></svg><span>สรุปรายบุคคล</span></button>
+      <button class="tab" role="tab" data-tab="staff" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>พนักงาน</span></button>
+      <button class="tab" role="tab" data-tab="requests" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg><span>คำขอเข้าใช้</span><span id="badgeReq" class="count"></span></button>
+      <button class="tab" role="tab" data-tab="admins" aria-selected="false"><svg class="ic" aria-hidden="true"><use href="#i-shield-check"/></svg><span>ผู้ดูแลระบบ</span></button>
+    </div>
+
+    <div id="periodBar" class="periodbar">
+      <label for="period">ช่วงเวลา</label>
+      <select id="period"></select>
+
+            <button type="button" id="btnLeaveOverviewModal" class="btn-ghost" onclick="openLeaveOverviewModal()"><svg class="ic" aria-hidden="true"><use href="#i-calendar-days"/></svg><span>สรุปภาพรวมการลา</span></button>
+      <button type="button" id="btnLeavePdf" class="btn-ghost" onclick="openLeavePdf()"><svg class="ic" aria-hidden="true"><use href="#i-printer"/></svg><span>ส่งออก PDF</span></button>
+
+
+      <button type="button" id="btnExportPeople" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span>ส่งออกสรุปรายบุคคล (CSV)</span></button>
+      <button type="button" id="btnExportRows" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-download"/></svg><span>ส่งออกรายการลาทั้งหมด (CSV)</span></button>
+    </div>
+
+    <section id="panel-dash" class="dash">
+      <div id="statTiles" class="tiles"></div>
+      <div class="grid2">
+        <div class="card"><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-chart"/></svg><span>วันลาที่อนุมัติ แยกตามประเภท</span></h2><div id="chartType" class="hbars"></div></div>
+        <div class="card"><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-calendar-days"/></svg><span>วันลาที่อนุมัติ รายเดือน</span></h2><div id="chartMonth" class="vbars"></div></div>
+      </div>
+      <div class="grid2">
+        <div class="card"><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-calendar-check"/></svg><span>ลาอยู่วันนี้</span></h2><div id="listToday" class="list"></div></div>
+        <div class="card"><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-calendar-range"/></svg><span>การลา 14 วันข้างหน้า</span></h2><div id="listUpcoming" class="list"></div></div>
+      </div>
+    </section>
+
+    <section id="panel-people" class="card" hidden>
+      <div class="toolbar">
+        <div><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-clipboard-list"/></svg><span>สรุปการลารายบุคคล</span></h2><p class="hint" style="margin:0">นับเฉพาะใบลาที่อนุมัติแล้ว ตามวันแรกที่ลา เรียงจากลามากไปน้อย</p></div>
+        <input type="text" id="pQ" placeholder="ค้นหาชื่อ" maxlength="50" style="max-width:260px">
+      </div>
+      <div class="table-wrap keep"><table><thead id="peopleHead"></thead><tbody id="peopleBody"></tbody></table></div>
+    </section>
+
+    <section id="panel-requests" class="card" hidden>
+      <div class="toolbar">
+        <div><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg><span>คำขอเข้าใช้งาน</span></h2><p class="hint" style="margin:0">พนักงานขอเพิ่มชื่อจากหน้าแรก ตรวจสอบว่าเป็นบุคลากรของหน่วยจริงก่อนอนุมัติ เมื่ออนุมัติ ระบบจะเพิ่มชื่อและตั้ง PIN เริ่มต้น 1234 ให้</p></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select id="rStatus" style="max-width:200px"><option value="Pending">รออนุมัติ</option><option value="all">ทั้งหมด</option></select>
+          <button type="button" id="btnClearReq" class="btn btn-sm">ล้างคำขอที่ค้างทั้งหมด</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>ชื่อ-ตำแหน่ง</th><th>ข้อมูลติดต่อ</th><th>ส่งเมื่อ</th><th>สถานะ / ดำเนินการ</th></tr></thead>
+        <tbody id="reqBody"></tbody>
+      </table></div>
+    </section>
+
+    <section id="panel-leaves" class="card" hidden>
+      <div class="filters">
+        <div class="field"><label for="fStatus">สถานะ</label>
+          <select id="fStatus">
+            <option value="Pending">รออนุมัติ</option><option value="all">ทั้งหมด</option>
+            <option value="Approve">อนุมัติแล้ว</option><option value="Reject">ไม่อนุมัติ</option><option value="Cancelled">ยกเลิกแล้ว</option>
+          </select></div>
+        <div class="field"><label for="fMonthM">เดือนที่เริ่มลา (พ.ศ.)</label><div class="mrow"><select id="fMonthM" aria-label="เดือน"><option value="">ทุกเดือน</option><option value="01">มกราคม</option><option value="02">กุมภาพันธ์</option><option value="03">มีนาคม</option><option value="04">เมษายน</option><option value="05">พฤษภาคม</option><option value="06">มิถุนายน</option><option value="07">กรกฎาคม</option><option value="08">สิงหาคม</option><option value="09">กันยายน</option><option value="10">ตุลาคม</option><option value="11">พฤศจิกายน</option><option value="12">ธันวาคม</option></select><select id="fMonthY" aria-label="ปี พ.ศ."><option value="">ทุกปี</option></select></div></div>
+        <div class="field"><label for="fQ">ค้นหาชื่อ</label><input type="text" id="fQ" maxlength="50"></div>
+        <button type="button" id="btnSearch" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg><span>ค้นหา / รีเฟรช</span></button>
+      </div>
+      <p id="leavesInfo" class="hint"></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>ส่งเมื่อ</th><th>ชื่อ-ตำแหน่ง</th><th>ประเภท</th><th>วันที่ลา</th><th class="c">วัน</th><th>สถานะ / ดำเนินการ</th></tr></thead>
+        <tbody id="leavesBody"></tbody>
+      </table></div>
+    </section>
+
+    <section id="panel-late" class="card" hidden>
+      <div class="toolbar">
+        <div>
+          <h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg><span>บันทึกมาสาย / ขาดเวร</span></h2>
+          <p class="hint" style="margin:0">เลือกพนักงาน เดือน และปี แล้วติ๊กวันที่มาสายบนปฏิทิน จากนั้นกดบันทึก ข้อมูลจะแสดงเป็นตัว F ในตารางสรุปภาพรวมการลา</p>
+        </div>
+      </div>
+      <div class="filters">
+        <div class="field"><label for="lateStaff">พนักงาน</label><select id="lateStaff"></select></div>
+        <div class="field"><label for="lateMonth">เดือน</label><select id="lateMonth"></select></div>
+        <div class="field"><label for="lateYear">ปี (พ.ศ.)</label><select id="lateYear"></select></div>
+        <div class="field"><label for="lateNote">หมายเหตุ (ไม่บังคับ)</label><input type="text" id="lateNote" maxlength="100" placeholder="ใช้กับวันที่ติ๊กเพิ่มใหม่"></div>
+      </div>
+      <div id="lateCal" class="cal"></div>
+      <div class="late-foot">
+        <span id="lateInfo" class="hint" style="margin:0"></span>
+        <button type="button" id="btnLateSave" class="btn-primary" style="width:auto;padding:0 32px" disabled><svg class="ic" aria-hidden="true"><use href="#i-save"/></svg><span>บันทึก</span></button>
+      </div>
+    </section>
+    
+    <section id="panel-staff" class="card" hidden>
+      <div class="toolbar">
+        <div><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-users"/></svg><span>พนักงาน</span></h2><p class="hint" style="margin:0">ผู้ที่ปิดการใช้งานจะไม่ปรากฏในหน้าแจ้งลา แต่ประวัติการลายังอยู่</p></div>
+        <button type="button" id="btnAddStaff" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-user-plus"/></svg><span>เพิ่มพนักงาน</span></button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>ชื่อ-นามสกุล</th><th>ตำแหน่ง</th><th class="c">สถานะ</th><th class="c">PIN</th><th>สิทธิ์ใช้งานระบบ</th><th>จัดการ</th></tr></thead>
+        <tbody id="staffBody"></tbody>
+      </table></div>
+    </section>
+
+    <section id="panel-admins" class="card" hidden>
+      <div class="toolbar">
+        <div><h2 class="h-ic"><svg class="ic" aria-hidden="true"><use href="#i-shield-check"/></svg><span>ผู้ดูแลระบบ</span></h2><p class="hint" style="margin:0">ต้องเหลือผู้ดูแลที่ใช้งานได้อย่างน้อย 1 คน และลบหรือปิดบัญชีตัวเองไม่ได้</p></div>
+        <button type="button" id="btnAddAdmin" class="btn-ghost"><svg class="ic" aria-hidden="true"><use href="#i-user-plus"/></svg><span>เพิ่มผู้ดูแล</span></button>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>ชื่อผู้ใช้</th><th>ชื่อที่แสดง</th><th class="c">สถานะ</th><th>จัดการ</th></tr></thead>
+        <tbody id="adminsBody"></tbody>
+      </table></div>
+    </section>
+  </div>
+
+  <!-- Fullscreen Modal: สรุปภาพรวมการลา -->
+  <div id="leaveOverviewModal" class="modal-fullscreen" style="display: none;">
+    <div class="modal-fullscreen-content">
+      
+      <!-- Modal Header -->
+      <div class="modal-fullscreen-header">
+        <div class="modal-fullscreen-title">
+          <svg class="ic" aria-hidden="true"><use href="#i-calendar-days"/></svg>
+          <span>สรุปภาพรวมการลา</span>
+        </div>
+        <button type="button" class="btn-close-modal" onclick="closeLeaveOverviewModal()" title="ปิด" aria-label="ปิด"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+
+      <!-- Modal Body -->
+        <div class="modal-fullscreen-body" id="leaveOverviewModalBody">
+          <!-- แถบควบคุมและสัญลักษณ์ย่อ -->
+          <div class="overview-header-controls">
+            <div class="overview-filter-group">
+              <label for="overviewMonth" class="form-label">เดือน:</label>
+              <select id="overviewMonth" class="form-select" onchange="loadLeaveMatrixData()">
+                <option value="1">มกราคม</option>
+                <option value="2">กุมภาพันธ์</option>
+                <option value="3">มีนาคม</option>
+                <option value="4">เมษายน</option>
+                <option value="5">พฤษภาคม</option>
+                <option value="6">มิถุนายน</option>
+                <option value="7">กรกฎาคม</option>
+                <option value="8">สิงหาคม</option>
+                <option value="9">กันยายน</option>
+                <option value="10">ตุลาคม</option>
+                <option value="11">พฤศจิกายน</option>
+                <option value="12">ธันวาคม</option>
+              </select>
+
+              <label for="overviewYear" class="form-label" style="margin-left: 12px;">ปี (พ.ศ.):</label>
+              <select id="overviewYear" class="form-select" onchange="loadLeaveMatrixData()"></select>
+            </div>
+
+            <!-- Legend แสดงคำอธิบายสัญลักษณ์ย่อ -->
+            <div class="overview-legend">
+              <span class="legend-item"><b class="badge-v">V</b> วันลาพักผ่อน</span>
+              <span class="legend-item"><b class="badge-p">P</b> ลากิจ</span>
+              <span class="legend-item"><b class="badge-s">S</b> ลาป่วย</span>
+              <span class="legend-item"><b class="badge-f">F</b> ขาดเวร/มาสาย</span>
+              <span class="legend-item"><b class="badge-o">O</b> งดเวรนอกเวลา</span>
+            </div>
+          </div>
+
+          <!-- ตารางสรุปการลา Matrix Table -->
+          <div class="matrix-table-wrapper">
+            <table class="matrix-table" id="matrixLeaveTable">
+              <thead id="matrixHead">
+                <!-- ส่วนหัวตารางจะถูกสร้างผ่าน JS -->
+              </thead>
+              <tbody id="matrixBody">
+                <!-- ข้อมูลรายชื่อและวันลาจะถูกสร้างผ่าน JS -->
+              </tbody>
+            </table>
+          </div>
+      </div>
+
+    </div>
+  </div>
+
+
+
+</main>
+
+<footer class="site-footer"><p>พัฒนาโดย <span class="footer-author">ทนพญ. มุกดารัตน์ สุพัฒน์</span></p></footer>
+
+  <!-- ปฏิทินวันลา: พรีวิวและส่งออก PDF -->
+  <div id="calPdfModal" class="calpdf" style="display:none" role="dialog" aria-modal="true" aria-label="ส่งออกปฏิทินวันลาเป็น PDF">
+    <div class="calpdf-bar no-print">
+      <button type="button" class="btn-ghost calpdf-back" onclick="closeLeavePdf()" title="กลับไปหน้าแดชบอร์ด (Esc)"><svg class="ic" aria-hidden="true"><use href="#i-arrow-left"/></svg><span>กลับ</span></button>
+      <div class="calpdf-title"><svg class="ic" aria-hidden="true"><use href="#i-calendar-days"/></svg><span>ปฏิทินวันลา (พรีวิวก่อนส่งออก)</span></div>
+      <label for="calMonth">เดือน</label><select id="calMonth" class="form-select"></select>
+      <label for="calYear">ปี (พ.ศ.)</label><select id="calYear" class="form-select"></select>
+      <span class="calpdf-grow"></span>
+      <span class="calpdf-tip">ในหน้าต่างพิมพ์ เลือก “บันทึกเป็น PDF” ปลายทาง · ขนาด A4 แนวนอน</span>
+      <button type="button" id="btnCalPrint" class="btn-ghost calpdf-go"><svg class="ic" aria-hidden="true"><use href="#i-printer"/></svg><span>ส่งออก / พิมพ์ PDF</span></button>
+      <button type="button" class="btn-ghost btn-icon calpdf-x" onclick="closeLeavePdf()" title="ปิดพรีวิว (Esc)" aria-label="ปิดพรีวิว"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="calpdf-scroll"><div id="calSheet" class="calsheet"></div></div>
+  </div>
+
+<?!= include_('AdminJS'); ?>
+</body>
+</html>

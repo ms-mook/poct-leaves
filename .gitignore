@@ -1,0 +1,9 @@
+node_modules/
+public/
+.env
+.env.*
+.vercel/
+# ไฟล์ข้อมูลจริง (ข้อมูลส่วนบุคคล + PIN hash) ห้ามขึ้น GitHub
+seed*.sql
+data/
+*.grid.json

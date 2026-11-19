@@ -1,0 +1,652 @@
+<script>
+(function () {
+  'use strict';
+
+  const $ = id => document.getElementById(id);
+  const TH = 'th-TH-u-ca-buddhist';
+  const STATUS_TH = { Pending: 'รออนุมัติ', Approve: 'อนุมัติแล้ว', Reject: 'ไม่อนุมัติ', Cancelled: 'ยกเลิกแล้ว' };
+  const st = { token: null, user: null, pin: null, types: [], limits: { maxEntries: 10, pastDays: 90, futureDays: 365 }, quota: { max: 0, used: {} }, entries: [], seq: 0, busy: false };
+
+  // ---------- เก็บเซสชัน/ร่างฟอร์มไว้ในแท็บนี้ (sessionStorage: ปิดแท็บแล้วหาย ไม่ข้ามเครื่อง ไม่เก็บ PIN) ----------
+  const store = {
+    get(k) { try { return JSON.parse(sessionStorage.getItem(k) || 'null'); } catch (e) { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* ใช้ไม่ได้ก็ข้าม */ } },
+    del(k) { try { sessionStorage.removeItem(k); } catch (e) { /* ข้าม */ } }
+  };
+  const DRAFT_KEY = 'lv.draft', SESS_KEY = 'lv.sess', DRAFT_MAX_MS = 12 * 3600 * 1000;
+
+  // ---------- helpers ----------
+  /** สร้าง element ด้วย textContent เท่านั้น (ไม่ใช้ innerHTML) กัน XSS */
+  function el(tag, props, ...kids) {
+    const e = document.createElement(tag);
+    for (const k in (props || {})) {
+      if (k === 'class') e.className = props[k];
+      else if (k === 'text') e.textContent = props[k];
+      else if (k.indexOf('on') === 0) e.addEventListener(k.slice(2), props[k]);
+      else e.setAttribute(k, props[k]);
+    }
+    kids.flat().forEach(c => { if (c != null) e.append(c.nodeType ? c : document.createTextNode(c)); });
+    return e;
+  }
+  // ---------- ไอคอน (sprite อยู่ใน Icons.html) ----------
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function ic(name) {
+    const s = document.createElementNS(SVGNS, 'svg'), u = document.createElementNS(SVGNS, 'use');
+    s.setAttribute('class', 'ic'); s.setAttribute('aria-hidden', 'true');
+    u.setAttribute('href', '#i-' + name); s.append(u);
+    return s;
+  }
+  const STATUS_IC = { Pending: 'clock', Approve: 'circle-check', Reject: 'circle-x', Cancelled: 'ban' };
+  const badge = status => el('span', { class: 'badge bi st-' + status }, ic(STATUS_IC[status] || 'clock'), STATUS_TH[status] || status);
+  /** สถานะกำลังทำงานของปุ่มที่มีไอคอน + ข้อความ (<svg><use/></svg><span class="bt">) : ไอคอนเปลี่ยนเป็นวงกลมหมุน แล้วคืนค่าเดิมเมื่อเสร็จ */
+  function busyBtn(btn, on, text) {
+    const u = btn.querySelector('use'), t = btn.querySelector('.bt');
+    if (on) { btn.dataset.ic = u.getAttribute('href'); btn.dataset.tx = t.textContent; u.setAttribute('href', '#i-loader'); t.textContent = text; btn.classList.add('busy'); }
+    else { u.setAttribute('href', btn.dataset.ic); t.textContent = btn.dataset.tx; btn.classList.remove('busy'); }
+    btn.disabled = on;
+  }
+  const MONTH_TH = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+  const MON_S = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  const DOW_S = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
+  const p2 = n => ('0' + n).slice(-2);
+  const toYmd = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+  function parseYmd(s) { const p = s.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
+  function fmtDate(s, long) {
+    if (!s) return '-';
+    return parseYmd(s).toLocaleDateString(TH, long
+      ? { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' }
+      : { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  /** วันที่แบบสั้นพร้อมวัน เช่น "พฤ. 22 ต.ค. 2569" (ปี พ.ศ. ทุกจุดในหน้านี้ใช้รูปแบบเดียวกัน ไม่ขึ้นกับภาษาของเบราว์เซอร์) */
+  function fmtDay(s) { if (!s) return '-'; const d = parseYmd(s); return DOW_S[d.getDay()] + ' ' + d.getDate() + ' ' + MON_S[d.getMonth()] + ' ' + (d.getFullYear() + 543); }
+  function fmtTs(s) { if (!s) return '-'; const a = s.split(' '); return fmtDate(a[0]) + (a[1] ? ' ' + a[1] + ' น.' : ''); }
+  const alertBox = (icon, text) => Swal.fire({ icon: icon, text: text, confirmButtonText: 'ตกลง' });
+  const toast = text => Swal.fire({ toast: true, position: 'top', icon: 'success', title: text, timer: 2500, showConfirmButton: false });
+
+  function call(name, args) {
+    return new Promise(resolve => {
+      google.script.run
+        .withSuccessHandler(r => resolve(r || { ok: false, message: 'ไม่ได้รับการตอบกลับจากระบบ' }))
+        .withFailureHandler(() => resolve({ ok: false, message: 'เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่' }))
+        [name](...args);
+    });
+  }
+
+  async function api(name, ...args) {
+    const r = await call(name, args);
+    if (!r.ok && r.code === 'AUTH') {
+      saveDraft();                                       // ก่อนล้างหน้า เก็บฟอร์มที่กรอกค้างไว้ก่อน
+      const keep = !!store.get(DRAFT_KEY);
+      resetSession(); show('screenLogin');
+      $('loginError').textContent = r.message + (keep ? ' (ฟอร์มที่กรอกไว้จะกลับมาให้หลังเข้าสู่ระบบ)' : '');
+    }
+    else if (!r.ok && r.code === 'MUST_CHANGE_PIN') openPin(true);
+    return r;
+  }
+
+  function show(screen) {
+    ['screenLoading', 'screenLogin', 'screenRequest', 'screenPin', 'screenApp'].forEach(id => { $(id).hidden = id !== screen; });
+    if (screen !== 'screenApp') $('fabNew').hidden = true;
+    $('userBar').hidden = !st.token;
+    window.scrollTo(0, 0);
+  }
+
+  function resetSession() {
+    st.token = null; st.user = null; st.pin = null; st.entries = []; st.quota = { max: 0, used: {} }; store.del(SESS_KEY);
+    $('entries').replaceChildren(); $('historyBody').replaceChildren(); $('allBody').replaceChildren(); $('meTiles').replaceChildren();
+    ['pinInput', 'oldPin', 'newPin', 'newPin2'].forEach(id => { $(id).value = ''; });
+    $('pinError').textContent = '';
+  }
+
+  // ---------- เริ่มระบบ ----------
+  async function init() {
+    $('loadingText').textContent = 'กำลังโหลด...'; $('btnRetry').hidden = true;
+    show('screenLoading');
+    const r = await api('getBootstrap');
+    if (!r.ok) { $('loadingText').textContent = r.message; $('btnRetry').hidden = false; return; }
+    st.types = r.leaveTypes; st.limits = r.limits; st.quota.max = (r.limits && r.limits.offDutyMaxDays) || 0;
+    const sel = $('staffSelect');
+    sel.replaceChildren(el('option', { value: '', text: r.staff.length ? 'เลือกชื่อของคุณ' : 'ยังไม่มีรายชื่อ กรุณาติดต่อผู้ดูแล' }),
+      ...r.staff.map(s => el('option', { value: s.id, text: s.name })));
+    $('reqPos').replaceChildren(el('option', { value: '', text: 'เลือกตำแหน่ง' }), ...r.positions.map(p => el('option', { value: p, text: p })));
+    fillMePeriod();
+    const sess = store.get(SESS_KEY);
+    if (sess && sess.token) {                            // รีเฟรชหน้า: กลับเข้าระบบเดิมถ้าเซสชันยังไม่หมด
+      const rs = await call('staffResume', [sess.token]);
+      if (rs.ok) { st.token = sess.token; st.user = rs.staff; enterApp(); return; }
+      store.del(SESS_KEY);
+    }
+    show('screenLogin');
+  }
+
+  // ---------- ล็อกอิน / PIN ----------
+  async function onLogin(ev) {
+    ev.preventDefault();
+    if (st.busy) return;
+    const btn = $('loginBtn'), err = $('loginError');
+    err.textContent = ''; st.busy = true; busyBtn(btn, true, 'กำลังเข้าสู่ระบบ...');
+    const pin = $('pinInput').value;
+    const r = await api('staffLogin', $('staffSelect').value, pin);
+    st.busy = false; busyBtn(btn, false);
+    if (!r.ok) { err.textContent = r.message; $('pinInput').value = ''; return; }
+    $('pinInput').value = '';
+    st.token = r.token; st.user = r.staff; st.pin = r.mustChangePin ? pin : null;
+    if (r.mustChangePin) openPin(true); else enterApp();
+  }
+
+  function openPin(forced) {
+    const useStored = forced && !!st.pin;
+    $('pinTitle').textContent = forced ? 'ตั้ง PIN ใหม่ก่อนเริ่มใช้งาน' : 'เปลี่ยน PIN';
+    $('oldPinWrap').hidden = useStored;
+    $('pinCancel').hidden = forced;
+    $('pinError').textContent = '';
+    ['oldPin', 'newPin', 'newPin2'].forEach(id => { $(id).value = ''; });
+    show('screenPin');
+  }
+
+  async function onPinSubmit(ev) {
+    ev.preventDefault();
+    if (st.busy) return;
+    const err = $('pinError'), a = $('newPin').value, b = $('newPin2').value;
+    if (a !== b) { err.textContent = 'PIN ใหม่ทั้งสองช่องไม่ตรงกัน'; return; }
+    const old = st.pin || $('oldPin').value;
+    st.busy = true; $('pinBtn').disabled = true; err.textContent = '';
+    const r = await api('staffChangePin', st.token, old, a);
+    st.busy = false; $('pinBtn').disabled = false;
+    if (!r.ok) { if (r.code !== 'AUTH') err.textContent = r.message; if (r.code === 'BAD_PIN') { st.pin = null; $('oldPinWrap').hidden = false; } return; }
+    st.pin = null;
+    ['oldPin', 'newPin', 'newPin2'].forEach(id => { $(id).value = ''; });
+    toast(r.message);
+    enterApp();
+  }
+
+  async function logout() {
+    const t = st.token;
+    store.del(DRAFT_KEY);                                // ออกเองโดยตั้งใจ = ไม่เก็บร่างไว้ให้คนถัดไป
+    resetSession(); show('screenLogin');
+    if (t) call('staffLogout', [t]);
+  }
+
+  // ---------- หน้าแจ้งลา ----------
+  function enterApp() {
+    $('userName').textContent = st.user.name;
+    $('whoAmI').textContent = 'ผู้แจ้งลา: ' + st.user.name + ' (' + st.user.position + ')';
+    store.set(SESS_KEY, { token: st.token, user: st.user });
+    if (!st.entries.length && !restoreDraft()) addEntry();
+    all.page = 1; calReset(); setView('all');
+    show('screenApp');
+    watchForm();
+    loadHistory();
+    loadMySummary();
+    loadAll();
+    loadQuota();
+  }
+
+  /** ปุ่มลัด "แจ้งลา" บนมือถือ: โชว์เมื่อฟอร์มอยู่นอกจอ */
+  let formObs = null;
+  function watchForm() {
+    const fab = $('fabNew'), f = $('formTitle');
+    if (!('IntersectionObserver' in window)) return;
+    if (formObs) formObs.disconnect();
+    formObs = new IntersectionObserver(es => { fab.hidden = es[0].isIntersecting || $('screenApp').hidden; }, { threshold: 0.2 });
+    formObs.observe(f);
+  }
+
+  function dateLimits() {
+    const t = new Date(), mk = n => toYmd(new Date(t.getFullYear(), t.getMonth(), t.getDate() + n));
+    return { min: mk(-st.limits.pastDays), max: mk(st.limits.futureDays) };
+  }
+
+  // ---------- ตัวเลือกวันที่ (ปี พ.ศ.) ----------
+  /** แทน <input type=date> ซึ่งแสดงรูปแบบ/ปีตามเบราว์เซอร์ (มักเป็น ค.ศ.) — คืน { root, input } โดย input มี value/min/max/disabled เหมือนเดิม และยิง 'change' เมื่อเลือกวัน */
+  function dateField(o) {
+    const inp = el('input', { type: 'hidden' });
+    let val = '', mn = o.min || '', mx = o.max || '', dis = false;
+    const txt = el('span', { class: 'dp-txt ph', text: 'เลือกวันที่' });
+    const btn = el('button', { type: 'button', class: 'dp-btn', 'aria-haspopup': 'dialog', 'aria-label': o.label }, ic('calendar'), txt);
+    const paint = () => { txt.textContent = val ? fmtDay(val) : 'เลือกวันที่'; txt.className = 'dp-txt' + (val ? '' : ' ph'); };
+    Object.defineProperty(inp, 'value', { get: () => val, set: v => { val = v || ''; paint(); }, configurable: true });
+    Object.defineProperty(inp, 'min', { get: () => mn, set: v => { mn = v || ''; }, configurable: true });
+    Object.defineProperty(inp, 'max', { get: () => mx, set: v => { mx = v || ''; }, configurable: true });
+    Object.defineProperty(inp, 'disabled', { get: () => dis, set: v => { dis = !!v; btn.disabled = dis; }, configurable: true });
+    btn.addEventListener('click', () => openPicker());
+
+    function openPicker() {
+      if (dis) return;
+      const start = parseYmd(val || (o.hint && o.hint()) || toYmd(new Date()));
+      let vy = start.getFullYear(), vm = start.getMonth();
+      const back = el('div', { class: 'dp-back' }), pop = el('div', { class: 'dp-pop', role: 'dialog', 'aria-modal': 'true', 'aria-label': o.label });
+      const title = el('b', { 'aria-live': 'polite' });
+      const prev = el('button', { type: 'button', class: 'dp-nav', 'aria-label': 'เดือนก่อนหน้า' }, ic('chevron-left'));
+      const next = el('button', { type: 'button', class: 'dp-nav', 'aria-label': 'เดือนถัดไป' }, ic('chevron-right'));
+      const grid = el('div', { class: 'dp-grid' });
+      const today = el('button', { type: 'button', class: 'btn-ghost', text: 'วันนี้' });
+      const close = el('button', { type: 'button', class: 'btn-ghost', text: 'ปิด' });
+      pop.append(el('div', { class: 'dp-head' }, prev, title, next), grid, el('div', { class: 'dp-foot' }, today, close));
+      back.append(pop);
+      const done = () => { back.remove(); document.removeEventListener('keydown', onKey, true); btn.focus(); };
+      const onKey = ev => { if (ev.key === 'Escape') { ev.stopPropagation(); done(); } };
+      const pick = ymd => { done(); if (ymd !== val) { inp.value = ymd; inp.dispatchEvent(new Event('change')); } };
+      const inRange = ymd => (!mn || ymd >= mn) && (!mx || ymd <= mx);
+      function draw() {
+        title.textContent = MONTH_TH[vm] + ' ' + (vy + 543);
+        const first = new Date(vy, vm, 1).getDay(), n = new Date(vy, vm + 1, 0).getDate(), t = toYmd(new Date());
+        prev.disabled = !!mn && toYmd(new Date(vy, vm, 0)) < mn;                 // วันสุดท้ายของเดือนก่อน < ขั้นต่ำ
+        next.disabled = !!mx && toYmd(new Date(vy, vm + 1, 1)) > mx;
+        const cells = DOW_S.map((d, i) => el('div', { class: 'dp-dow' + (i === 0 || i === 6 ? ' we' : ''), text: d }));
+        for (let i = 0; i < first; i++) cells.push(el('div'));
+        for (let d = 1; d <= n; d++) {
+          const ymd = vy + '-' + p2(vm + 1) + '-' + p2(d), w = new Date(vy, vm, d).getDay();
+          const b = el('button', { type: 'button', class: 'dp-day' + (w === 0 || w === 6 ? ' we' : '') + (ymd === t ? ' today' : '') + (ymd === val ? ' sel' : ''), text: String(d), 'aria-label': fmtDate(ymd, true) });
+          if (!inRange(ymd)) b.disabled = true; else b.addEventListener('click', () => pick(ymd));
+          cells.push(b);
+        }
+        grid.replaceChildren(...cells);
+      }
+      prev.addEventListener('click', () => { vm--; if (vm < 0) { vm = 11; vy--; } draw(); });
+      next.addEventListener('click', () => { vm++; if (vm > 11) { vm = 0; vy++; } draw(); });
+      today.addEventListener('click', () => { const t = toYmd(new Date()); if (inRange(t)) pick(t); else { const d = new Date(); vy = d.getFullYear(); vm = d.getMonth(); draw(); } });
+      close.addEventListener('click', done);
+      back.addEventListener('mousedown', ev => { if (ev.target === back) done(); });
+      document.addEventListener('keydown', onKey, true);
+      draw(); document.body.append(back);
+      (grid.querySelector('.dp-day.sel') || grid.querySelector('.dp-day:not(:disabled)') || close).focus();
+    }
+    return { root: el('div', { class: 'dp' }, btn, inp), input: inp };
+  }
+
+  function addEntry() {
+    if (st.entries.length >= st.limits.maxEntries) { alertBox('info', 'เพิ่มได้สูงสุด ' + st.limits.maxEntries + ' รายการต่อครั้ง'); return; }
+    const lim = dateLimits(), e = { id: ++st.seq, req: 0 };
+    e.title = el('h3');
+    e.remove = el('button', { type: 'button', class: 'btn-ghost btn-icon danger', title: 'ลบรายการนี้', 'aria-label': 'ลบรายการนี้', onclick: () => removeEntry(e) }, ic('trash'));
+    e.type = el('select', { required: '', 'aria-label': 'ประเภทการลา' },
+      el('option', { value: '', text: 'เลือกประเภทการลา' }), st.types.map(t => el('option', { value: t[0], text: t[1] })));
+    e.one = el('input', { type: 'checkbox' });
+    e.startF = dateField({ label: 'วันแรกที่ลา', min: lim.min, max: lim.max });
+    e.endF = dateField({ label: 'วันสุดท้ายที่ลา', min: lim.min, max: lim.max, hint: () => e.start.value });
+    e.start = e.startF.input; e.end = e.endF.input;
+    e.sum = el('div', { class: 'sum', 'aria-live': 'polite' });
+    e.quota = el('div', { class: 'sum', 'aria-live': 'polite', hidden: '' });   // สิทธิ์งดเวรนอกเวลาคงเหลือ (แสดงเมื่อเลือกประเภทนี้)
+    e.root = el('div', { class: 'entry' },
+      el('div', { class: 'entry-head' }, e.title, e.remove),
+      el('div', { class: 'field' }, el('span', { class: 'lbl', text: 'ประเภทการลา' }), e.type),
+      el('label', { class: 'check' }, e.one, 'ลาเพียง 1 วัน'),
+      el('div', { class: 'dates' },
+        el('div', {}, el('span', { class: 'lbl', text: 'วันแรกที่ลา' }), e.startF.root),
+        el('div', {}, el('span', { class: 'lbl', text: 'วันสุดท้ายที่ลา (นับรวม)' }), e.endF.root)),
+      e.sum, e.quota);
+
+    const sync = () => {
+      if (e.start.value) e.end.min = e.start.value;
+      if (e.end.value && e.start.value && e.end.value < e.start.value) e.end.value = '';   // วันสุดท้ายต้องไม่ก่อนวันแรก
+      if (e.one.checked) e.end.value = e.start.value;
+      e.end.disabled = e.one.checked;
+      calc(e);
+    };
+    e.type.addEventListener('change', () => calc(e));
+    e.start.addEventListener('change', sync);
+    e.one.addEventListener('change', sync);
+    e.end.addEventListener('change', () => calc(e));
+
+    [e.type, e.start, e.end, e.one].forEach(x => x.addEventListener('change', saveDraft));
+    [e.type, e.start, e.end, e.one].forEach(x => x.addEventListener('change', refreshQuota));
+    st.entries.push(e);
+    $('entries').append(e.root);
+    refreshEntries();
+    return e;
+  }
+
+  // ---------- ร่างฟอร์ม ----------
+  function saveDraft() {
+    if (!st.user || !st.entries.length) return;
+    const list = st.entries.map(e => ({ t: e.type.value, s: e.start.value, e: e.end.value, o: e.one.checked }));
+    if (list.every(x => !x.t && !x.s && !x.e)) store.del(DRAFT_KEY);
+    else store.set(DRAFT_KEY, { uid: st.user.id, at: Date.now(), list: list });
+  }
+  function restoreDraft() {
+    const d = store.get(DRAFT_KEY);
+    if (!d) return false;
+    if (d.uid !== st.user.id || Date.now() - d.at > DRAFT_MAX_MS || !Array.isArray(d.list) || !d.list.length) { store.del(DRAFT_KEY); return false; }
+    d.list.slice(0, st.limits.maxEntries).forEach(x => {
+      const e = addEntry(); if (!e) return;
+      if (x.t && st.types.some(t => t[0] === x.t)) e.type.value = x.t;
+      e.start.value = x.s || ''; e.one.checked = !!x.o;
+      e.end.value = x.o ? (x.s || '') : (x.e || ''); e.end.disabled = !!x.o;
+      if (x.s) e.end.min = x.s;
+      calc(e);
+    });
+    refreshQuota();
+    toast('กู้คืนฟอร์มที่กรอกค้างไว้แล้ว');
+    return true;
+  }
+
+  function removeEntry(e) {
+    if (st.entries.length < 2) return;
+    st.entries = st.entries.filter(x => x !== e);
+    e.root.remove(); refreshEntries(); saveDraft(); refreshQuota();
+  }
+
+  function refreshEntries() {
+    st.entries.forEach((e, i) => { e.title.textContent = 'รายการที่ ' + (i + 1); e.remove.hidden = st.entries.length < 2; });
+  }
+
+  // ---------- สิทธิ์งดเวรนอกเวลา (ไม่เกิน N วัน/เดือน นับตามเดือนของวันที่งดเวร) ----------
+  const OFF_KEY = 'off_duty_cancel';
+  /** จำนวนวันของรายการหนึ่ง แยกตามเดือน {'yyyy-mm': วัน} (นับวันปฏิทินทุกวัน) */
+  function offDaysByMonth(e) {
+    const out = {};
+    if (e.type.value !== OFF_KEY || !e.start.value || !e.end.value || e.end.value < e.start.value) return out;
+    const s = parseYmd(e.start.value), en = parseYmd(e.end.value);
+    for (let d = new Date(s), i = 0; d <= en && i < 400; d.setDate(d.getDate() + 1), i++) { const k = toYmd(d).slice(0, 7); out[k] = (out[k] || 0) + 1; }
+    return out;
+  }
+  const ymLabel = k => { const p = k.split('-'); return MONTH_TH[Number(p[1]) - 1] + ' ' + (Number(p[0]) + 543); };
+  /** รวมวันงดเวรนอกเวลาของทุกรายการในฟอร์มที่กำลังกรอก แยกตามเดือน */
+  function formOffTotals() {
+    const tot = {};
+    st.entries.forEach(e => { const m = offDaysByMonth(e); Object.keys(m).forEach(k => { tot[k] = (tot[k] || 0) + m[k]; }); });
+    return tot;
+  }
+  /** เดือนที่ใช้สิทธิ์เกิน (รวมของที่ส่งไปแล้ว + ที่กำลังกรอก) */
+  function quotaOver() {
+    const max = st.quota.max; if (!max) return [];
+    const tot = formOffTotals();
+    return Object.keys(tot).sort().filter(k => (st.quota.used[k] || 0) + tot[k] > max).map(k => ({ k: k, used: st.quota.used[k] || 0, add: tot[k] }));
+  }
+  function refreshQuota() {
+    const max = st.quota.max, tot = formOffTotals();
+    st.entries.forEach(e => {
+      const box = e.quota;
+      if (!max || e.type.value !== OFF_KEY) { box.hidden = true; box.replaceChildren(); return; }
+      box.hidden = false;
+      const mine = offDaysByMonth(e), keys = Object.keys(mine).sort();
+      if (!keys.length) { box.className = 'sum'; box.textContent = 'งดเวรนอกเวลาได้ไม่เกิน ' + max + ' วัน/เดือน (นับตามเดือนของวันที่งดเวร)'; return; }
+      let bad = false;
+      const lines = keys.map(k => {
+        const used = st.quota.used[k] || 0, all = used + tot[k], left = max - all;
+        if (all > max) bad = true;
+        return el('div', all > max ? {} : { class: 'sub' }, 'เดือน' + ymLabel(k) + ': ใช้สิทธิ์ ' + all + '/' + max + ' วัน' +
+          ' (ส่งแล้ว ' + used + ' + ในฟอร์มนี้ ' + tot[k] + (tot[k] > mine[k] ? ' [ใบนี้ ' + mine[k] + ']' : '') + ') → ' +
+          (all > max ? 'เกินสิทธิ์ ' + (all - max) + ' วัน' : left === 0 ? 'ครบสิทธิ์พอดี' : 'เหลือสิทธิ์อีก ' + left + ' วัน'));
+      });
+      box.className = 'sum' + (bad ? ' bad' : '');
+      box.replaceChildren(...lines);
+    });
+  }
+  async function loadQuota() {
+    if (!st.token) return;
+    const r = await api('getOffDutyQuota', st.token);
+    if (!r.ok) return;                                  // โหลดไม่ได้ก็ใช้งานต่อได้ (ฝั่งเซิร์ฟเวอร์ยังตรวจสิทธิ์ตอนส่งอยู่)
+    st.quota = { max: r.max || 0, used: r.used || {} };
+    refreshQuota();
+  }
+
+  async function calc(e) {
+    const t = e.type.value, s = e.start.value, en = e.end.value;
+    if (!(t && s && en)) { e.sum.replaceChildren(); e.sum.className = 'sum'; e.res = null; return null; }
+    const n = ++e.req;
+    e.sum.className = 'sum'; e.sum.textContent = 'กำลังคำนวณ...';
+    const r = await api('calculateDuration', st.token, t, s, en);
+    if (n !== e.req || st.entries.indexOf(e) < 0) return null;   // ผลเก่าที่มาช้า ทิ้ง
+    e.res = r; e.resKey = t + '|' + s + '|' + en;
+    if (!r.ok) { e.sum.className = 'sum bad'; e.sum.textContent = r.message.replace(/^รายการที่ \d+: /, ''); return r; }
+    const skipped = r.calendarDays - r.days;
+    const lines = [el('div', {}, el('strong', { text: 'ลา ' + r.days + ' วัน' }), ' กลับมาทำงาน ' + fmtDay(r.returnDate))];
+    if (skipped > 0) lines.push(el('div', { class: 'sub', text: 'ไม่นับเสาร์-อาทิตย์/วันหยุด ' + skipped + ' วัน' }));
+    e.sum.replaceChildren(...lines);
+    return r;
+  }
+
+  async function onSubmit(ev) {
+    ev.preventDefault();
+    if (st.busy) return;
+    const btn = $('submitBtn');
+    // 1) ตรวจว่ากรอกครบ และได้ผลคำนวณของทุกรายการ (ผลที่ยังไม่มา/ล้าสมัยจะคำนวณใหม่ก่อน)
+    st.busy = true; busyBtn(btn, true, 'กำลังตรวจสอบ...');
+    const results = [];
+    for (let i = 0; i < st.entries.length; i++) {
+      const e = st.entries[i], no = 'รายการที่ ' + (i + 1) + ': ';
+      if (!(e.type.value && e.start.value && e.end.value)) { st.busy = false; busyBtn(btn, false); alertBox('warning', no + 'กรุณาเลือกประเภทการลาและวันที่ให้ครบ'); return; }
+      const key = e.type.value + '|' + e.start.value + '|' + e.end.value;
+      const r = (e.res && e.resKey === key) ? e.res : await calc(e);
+      if (!r) { st.busy = false; busyBtn(btn, false); return; }                 // เซสชันหมด/ผลเก่า — api() จัดการหน้า login แล้ว
+      if (!r.ok) { st.busy = false; busyBtn(btn, false); if (r.code !== 'AUTH') alertBox('warning', no + r.message.replace(/^รายการที่ \d+: /, '')); return; }
+      results.push(r);
+    }
+    st.busy = false; busyBtn(btn, false);
+    const over = quotaOver();
+    if (over.length) {                                   // เกินสิทธิ์งดเวรนอกเวลา : แจ้งก่อนส่ง (เซิร์ฟเวอร์ตรวจซ้ำอีกชั้น)
+      Swal.fire({ icon: 'warning', html: el('div', {}, el('b', { text: 'งดเวรนอกเวลาได้ไม่เกิน ' + st.quota.max + ' วัน/เดือน' }),
+        ...over.map(o => el('div', { text: 'เดือน' + ymLabel(o.k) + ': ใช้ไปแล้ว ' + o.used + ' วัน + ใบนี้ ' + o.add + ' วัน = เกินสิทธิ์' })),
+        el('div', { text: 'กรุณาลดจำนวนวัน หรือย้ายไปเดือนอื่น' })), confirmButtonText: 'ตกลง' });
+      return;
+    }
+    // 2) หน้ายืนยัน: ให้ตรวจวันที่ (พ.ศ.) และจำนวนวันก่อนส่งจริง
+    const total = results.reduce((a, r) => a + r.days, 0);
+    const box = el('div', { class: 'cf' },
+      st.entries.map((e, i) => {
+        const r = results[i], t = st.types.find(x => x[0] === e.type.value);
+        const sk = r.calendarDays - r.days;
+        return el('div', { class: 'cf-row' },
+          el('b', { text: (st.entries.length > 1 ? (i + 1) + '. ' : '') + (t ? t[1] : '') }),
+          el('span', { text: e.start.value === e.end.value ? fmtDay(e.start.value) : fmtDay(e.start.value) + ' ถึง ' + fmtDay(e.end.value) }),
+          el('em', { text: 'รวม ' + r.days + ' วัน · กลับมาทำงาน ' + fmtDay(r.returnDate) }),
+          sk > 0 ? el('small', { text: 'ไม่นับเสาร์-อาทิตย์/วันหยุด ' + sk + ' วัน' }) : null);
+      }),
+      st.entries.length > 1 ? el('div', { class: 'cf-total', text: 'รวมทั้งหมด ' + total + ' วัน' }) : null,
+      el('p', { class: 'cf-note', text: 'ส่งแล้วแก้วันที่ไม่ได้ ถ้าผิดต้องยกเลิกใบลาแล้วส่งใหม่ (ยกเลิกได้เฉพาะใบที่ยังรออนุมัติ)' }));
+    const ok = await Swal.fire({ title: 'ตรวจสอบก่อนส่งใบลา', html: box, showCancelButton: true, confirmButtonText: 'ยืนยันส่งใบลา', cancelButtonText: 'กลับไปแก้ไข', reverseButtons: true, focusCancel: false });
+    if (!ok.isConfirmed) return;
+    st.busy = true; busyBtn(btn, true, 'กำลังส่ง...');
+    const payload = st.entries.map(e => ({ leaveTypeKey: e.type.value, startDate: e.start.value, endDate: e.end.value }));
+    const r = await api('submitLeave', st.token, payload);
+    st.busy = false; busyBtn(btn, false);
+    if (!r.ok) { if (r.code !== 'AUTH' && r.code !== 'MUST_CHANGE_PIN') { alertBox('warning', r.message); loadQuota(); } return; }
+    st.entries = []; $('entries').replaceChildren(); addEntry(); saveDraft();   // ฟอร์มว่าง = ลบร่าง
+    Swal.fire({ icon: 'success', text: r.message, confirmButtonText: 'ตกลง' });
+    loadHistory();
+    loadMySummary();
+    loadAll();
+    loadQuota();
+    if (!$('viewCal').hidden) loadCal();
+  }
+
+  // ---------- ประวัติ ----------
+  async function loadHistory() {
+    const tb = $('historyBody');
+    tb.replaceChildren(el('tr', {}, el('td', { colspan: '5', class: 'empty', text: 'กำลังโหลด...' })));
+    const r = await api('getMyLeaves', st.token);
+    if (!r.ok) { if (r.code !== 'AUTH') tb.replaceChildren(el('tr', {}, el('td', { colspan: '5', class: 'empty', text: r.message }))); return; }
+    if (!r.rows.length) { tb.replaceChildren(el('tr', {}, el('td', { colspan: '5', class: 'empty', text: 'ยังไม่มีประวัติการลา กรอกฟอร์มเพื่อแจ้งลา' }))); return; }
+    tb.replaceChildren(...r.rows.map(row => {
+      const range = row.start === row.end ? fmtDate(row.start) : fmtDate(row.start) + ' ถึง ' + fmtDate(row.end);
+      const detail = [];
+      if (row.status === 'Approve' || row.status === 'Reject') detail.push(el('div', { class: 'sub', text: 'โดย ' + row.by + ' ' + fmtTs(row.at) }));
+      if (row.status === 'Cancelled') detail.push(el('div', { class: 'sub', text: 'ยกเลิกเมื่อ ' + fmtTs(row.at) }));
+      if (row.status === 'Pending') detail.push(el('div', { class: 'sub', text: 'ส่งเมื่อ ' + fmtTs(row.ts) }));
+      if (row.note) detail.push(el('div', { class: 'note', text: 'หมายเหตุ: ' + row.note }));
+      if (row.status === 'Pending' && row.id) detail.push(el('button', { type: 'button', class: 'btn-chip', onclick: () => cancelLeave(row) }, ic('ban'), 'ยกเลิกใบลานี้'));
+      return el('tr', {},
+        el('td', { text: range }),
+        el('td', { text: row.type }),
+        el('td', { class: 'c', text: String(row.days) }),
+        el('td', { class: 'c' }, badge(row.status)),
+        el('td', {}, detail));
+    }));
+  }
+
+  async function cancelLeave(row) {
+    const c = await Swal.fire({ icon: 'question', title: 'ยกเลิกใบลานี้?', text: row.type + ' ' + fmtDate(row.start) + (row.start === row.end ? '' : ' ถึง ' + fmtDate(row.end)),
+      showCancelButton: true, confirmButtonText: 'ยกเลิกใบลา', cancelButtonText: 'ไม่ยกเลิก' });
+    if (!c.isConfirmed) return;
+    const r = await api('staffCancelLeave', st.token, row.id);
+    if (r.ok) toast(r.message); else if (r.code !== 'AUTH') alertBox('warning', r.message);
+    loadHistory();
+    loadMySummary();
+    loadAll();
+    loadQuota();
+  }
+
+  // ---------- สรุปการลาของฉัน ----------
+  function periodList() {
+    const now = new Date(), y = now.getFullYear(), fy = now.getMonth() >= 9 ? y + 1 : y;  // ปีงบประมาณเริ่ม 1 ต.ค.
+    const out = [];
+    for (let i = 0; i < 4; i++) out.push({ v: 'f' + (fy - i), t: 'ปีงบประมาณ ' + (fy - i + 543) + ' (ต.ค.-ก.ย.)' });
+    for (let i = 0; i < 3; i++) out.push({ v: 'c' + (y - i), t: 'ปีปฏิทิน ' + (y - i + 543) });
+    return out;
+  }
+  function periodRange(v) {
+    const y = Number(v.slice(1));
+    return v[0] === 'f' ? { from: (y - 1) + '-10-01', to: y + '-09-30' } : { from: y + '-01-01', to: y + '-12-31' };
+  }
+  function fillMePeriod() { $('mePeriod').replaceChildren(...periodList().map(p => el('option', { value: p.v, text: p.t }))); }
+  function tile(label, value, sub, tone) {
+    return el('div', { class: 'tile' + (tone ? ' ' + tone : '') },
+      el('div', { class: 'tile-label', text: label }),
+      el('div', { class: 'tile-value' }, String(value), el('small', { text: ' วัน' })),
+      sub ? el('div', { class: 'tile-sub', text: sub }) : null);
+  }
+  async function loadMySummary() {
+    const rg = periodRange($('mePeriod').value);
+    $('meTiles').replaceChildren(el('div', { class: 'tile', text: 'กำลังโหลด...' }));
+    const r = await api('getMySummary', st.token, rg.from, rg.to);
+    if (!r.ok) { if (r.code !== 'AUTH') $('meTiles').replaceChildren(el('div', { class: 'tile', text: r.message })); return; }
+    $('sumHint').textContent = 'นับเฉพาะใบลาที่อนุมัติแล้ว ตามวันแรกที่ลา | ใบลาในช่วงนี้ ' + r.requests + ' ใบ';
+    $('meTiles').replaceChildren(
+      tile('อนุมัติแล้วรวม', r.approvedTotal, r.pendingTotal ? 'รออนุมัติอีก ' + r.pendingTotal + ' วัน' : '', 'main'),
+      ...r.types.map(t => tile(t.label, t.approved, t.pending ? 'รออนุมัติ ' + t.pending + ' วัน' : '')));
+  }
+
+  // ---------- ขอเพิ่มชื่อเข้าระบบ ----------
+  async function onRequest(ev) {
+    ev.preventDefault();
+    if (st.busy) return;
+    const err = $('reqError'), btn = $('reqBtn');
+    err.textContent = ''; st.busy = true; busyBtn(btn, true, 'กำลังส่ง...');
+    const r = await api('requestStaffAccess', $('reqName').value, $('reqPos').value, $('reqContact').value);
+    st.busy = false; busyBtn(btn, false);
+    if (!r.ok) { err.textContent = r.message; return; }
+    $('requestForm').reset();
+    show('screenLogin');
+    Swal.fire({ icon: 'success', title: 'ส่งคำขอแล้ว', text: r.message, confirmButtonText: 'ตกลง' });
+  }
+
+  // ---------- ตารางการลาของทั้งหน่วย ----------
+  const all = { page: 1, req: 0, timer: null };
+
+  function setView(v) {
+    document.querySelectorAll('#viewTabs .tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.view === v)));
+    $('viewAll').hidden = v !== 'all';
+    $('viewCal').hidden = v !== 'cal';
+    $('viewMine').hidden = v !== 'mine';
+    if (v === 'cal') loadCal();
+  }
+
+  // ---------- ปฏิทินการลาของทั้งหน่วย ----------
+  const CAL_T = { V: 'ลาพักร้อน', P: 'ลากิจ', S: 'ลาป่วย', O: 'งดเวรนอกเวลา', L: 'ลา' };
+  const cal = { y: 0, m: 0, req: 0, data: null, sel: 0 };
+  function calReset() { const n = new Date(); cal.y = n.getFullYear(); cal.m = n.getMonth() + 1; cal.sel = 0; }
+  const cbadge = s => el('b', { class: 'cb cb-' + s, text: s, title: CAL_T[s] || '' });
+  function calLegend() {
+    $('calLegend').replaceChildren(...['V', 'P', 'S', 'O'].map(s => el('span', {}, cbadge(s), CAL_T[s])));
+  }
+  async function loadCal() {
+    if (!cal.y) calReset();
+    const n = ++cal.req;
+    $('calTitle').textContent = MONTH_TH[cal.m - 1] + ' ' + (cal.y + 543);
+    $('calGrid').replaceChildren(el('div', { class: 'empty', style: 'grid-column:1/-1;background:#fff;padding:24px;text-align:center', text: 'กำลังโหลด...' }));
+    calLegend();
+    const r = await api('getStaffCalendar', st.token, cal.m, cal.y);
+    if (n !== cal.req) return;
+    if (!r.ok) { if (r.code !== 'AUTH') $('calGrid').replaceChildren(el('div', { style: 'grid-column:1/-1;background:#fff;padding:24px;text-align:center', text: r.message })); return; }
+    cal.data = r; renderCal();
+  }
+  function renderCal() {
+    const r = cal.data, Y = r.year, M = r.month, nd = r.daysInMonth, first = new Date(Y, M - 1, 1).getDay(), td = toYmd(new Date());
+    const hol = {}; (r.holidays || []).forEach(d => { hol[d] = 1; });
+    const cells = DOW_S.map((d, i) => el('div', { class: 'cal-dow' + (i === 0 || i === 6 ? ' we' : ''), text: d }));
+    for (let i = 0; i < first; i++) cells.push(el('div', { class: 'cal-cell blank' }));
+    for (let d = 1; d <= nd; d++) {
+      const w = new Date(Y, M - 1, d).getDay(), ymd = Y + '-' + p2(M) + '-' + p2(d), list = r.days[d] || [];
+      list.sort((a, b) => (a.p - b.p) || ('VPSOL'.indexOf(a.s) - 'VPSOL'.indexOf(b.s)) || a.n.localeCompare(b.n, 'th'));
+      const shown = list.slice(0, 3);
+      const c = el('button', { type: 'button', class: 'cal-cell' + (w === 0 || w === 6 ? ' we' : '') + (hol[d] ? ' hol' : '') + (ymd === td ? ' today' : '') + (cal.sel === d ? ' sel' : ''), 'aria-label': fmtDay(ymd) + (list.length ? ' ลา ' + list.length + ' คน' : ' ไม่มีผู้ลา') },
+        el('div', { class: 'dn' }, el('b', { text: String(d) }), list.length ? el('small', { text: list.length + ' คน' }) : null),
+        el('div', { class: 'cal-ppl' }, shown.map(x => el('div', { class: 'cal-ce' + (x.p ? ' pend' : '') + (x.m ? ' mine' : '') }, cbadge(x.s), el('span', { class: 'nm', text: x.n }))),
+          list.length > 3 ? el('div', { class: 'cal-more', text: 'อีก ' + (list.length - 3) + ' คน' }) : null),
+        el('div', { class: 'cal-dots' }, list.slice(0, 8).map(x => el('i', { class: 't-' + x.s + (x.p ? ' pend' : '') }))));
+      c.addEventListener('click', () => { cal.sel = d; renderCal(); });
+      cells.push(c);
+    }
+    const rest = (7 - ((first + nd) % 7)) % 7;
+    for (let i = 0; i < rest; i++) cells.push(el('div', { class: 'cal-cell blank' }));
+    $('calGrid').replaceChildren(...cells);
+    const box = $('calDetail');
+    if (!cal.sel) { box.hidden = true; return; }
+    const list = (r.days[cal.sel] || []).slice();
+    list.sort((a, b) => (a.p - b.p) || a.n.localeCompare(b.n, 'th'));
+    box.hidden = false;
+    box.replaceChildren(el('h4', { text: fmtDay(Y + '-' + p2(M) + '-' + p2(cal.sel)) + (list.length ? ' · ลา ' + list.length + ' คน' : ' · ไม่มีผู้ลา') }),
+      list.length ? el('ul', {}, list.map(x => el('li', {}, cbadge(x.s), el('span', { text: x.n + (x.m ? ' (ฉัน)' : '') }), el('span', { class: 'tag', text: (CAL_T[x.s] || '') + (x.p ? ' · รออนุมัติ' : '') })))) : null);
+  }
+  function calMove(delta) { cal.m += delta; if (cal.m < 1) { cal.m = 12; cal.y--; } if (cal.m > 12) { cal.m = 1; cal.y++; } cal.sel = 0; loadCal(); }
+
+  async function loadAll() {
+    const n = ++all.req, body = $('allBody');
+    body.replaceChildren(el('tr', {}, el('td', { colspan: '6', class: 'empty', text: 'กำลังโหลด...' })));
+    const r = await api('getAllLeaves', st.token, { q: $('aQ').value, status: $('aStatus').value, pageSize: Number($('aSize').value), page: all.page });
+    if (n !== all.req) return;   // คำตอบเก่าที่มาช้า ทิ้ง
+    if (!r.ok) { if (r.code !== 'AUTH') body.replaceChildren(el('tr', {}, el('td', { colspan: '6', class: 'empty', text: r.message }))); return; }
+    all.page = r.page;
+    $('aInfo').textContent = 'พบ ' + r.total + ' รายการ';
+    if (!r.rows.length) { body.replaceChildren(el('tr', {}, el('td', { colspan: '6', class: 'empty', text: 'ไม่พบรายการที่ตรงเงื่อนไข' }))); renderPager(1); return; }
+    body.replaceChildren(...r.rows.map(row => el('tr', { class: row.mine ? 'mine' : '' },
+      el('td', {}, el('span', { class: 'strong', text: row.name }), row.mine ? el('span', { class: 'me-tag', text: 'ฉัน' }) : null),
+      el('td', { text: row.type }),
+      el('td', { text: row.start === row.end ? fmtDate(row.start) : fmtDate(row.start) + ' - ' + fmtDate(row.end) }),
+      el('td', { class: 'c', text: String(row.days) }),
+      el('td', { class: 'c' }, badge(row.status)),
+      el('td', { text: fmtTs(row.ts) }))));
+    renderPager(r.pages);
+  }
+
+  function renderPager(pages) {
+    const box = $('aPager');
+    box.replaceChildren();
+    if (pages <= 1) return;
+    const go = p => { all.page = p; loadAll(); };
+    const btn = (label, p, cls, disabled, aria) => el('button', Object.assign({ type: 'button', onclick: () => go(p) }, aria ? { 'aria-label': aria, title: aria } : {}, cls ? { class: cls } : {}, disabled ? { disabled: '' } : {}), label);
+    let end = Math.min(pages, Math.max(1, all.page - 2) + 4);
+    const start = Math.max(1, end - 4);
+    box.append(btn(ic('chevron-left'), all.page - 1, '', all.page === 1, 'หน้าก่อนหน้า'));
+    for (let i = start; i <= end; i++) box.append(btn(String(i), i, i === all.page ? 'active' : ''));
+    box.append(btn(ic('chevron-right'), all.page + 1, '', all.page === pages, 'หน้าถัดไป'));
+  }
+
+  // ---------- ผูกเหตุการณ์ ----------
+  $('loginForm').addEventListener('submit', onLogin);
+  $('pinForm').addEventListener('submit', onPinSubmit);
+  $('pinCancel').addEventListener('click', () => show('screenApp'));
+  $('leaveForm').noValidate = true;                    // ใช้ข้อความตรวจสอบภาษาไทยของระบบแทนข้อความของเบราว์เซอร์
+  $('leaveForm').addEventListener('submit', onSubmit);
+  $('btnAdd').addEventListener('click', addEntry);
+  $('btnRefresh').addEventListener('click', () => { loadAll(); loadHistory(); loadMySummary(); loadQuota(); if (!$('viewCal').hidden) loadCal(); });
+  $('calPrev').addEventListener('click', () => calMove(-1));
+  $('calNext').addEventListener('click', () => calMove(1));
+  $('calToday').addEventListener('click', () => { calReset(); loadCal(); });
+  $('fabNew').addEventListener('click', () => { $('formTitle').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  $('btnChangePin').addEventListener('click', () => openPin(false));
+  $('btnLogout').addEventListener('click', logout);
+  $('btnRetry').addEventListener('click', init);
+  document.querySelectorAll('#viewTabs .tab').forEach(b => b.addEventListener('click', () => setView(b.dataset.view)));
+  $('aQ').addEventListener('input', () => { clearTimeout(all.timer); all.timer = setTimeout(() => { all.page = 1; loadAll(); }, 350); });
+  $('aStatus').addEventListener('change', () => { all.page = 1; loadAll(); });
+  $('aSize').addEventListener('change', () => { all.page = 1; loadAll(); });
+  $('mePeriod').addEventListener('change', loadMySummary);
+  $('btnRequest').addEventListener('click', () => { $('reqError').textContent = ''; show('screenRequest'); });
+  $('reqBack').addEventListener('click', () => show('screenLogin'));
+  $('requestForm').addEventListener('submit', onRequest);
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>

@@ -1,0 +1,772 @@
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const TH = 'th-TH-u-ca-buddhist';
+  const STATUS_TH = { Pending: 'รออนุมัติ', Approve: 'อนุมัติแล้ว', Reject: 'ไม่อนุมัติ', Cancelled: 'ยกเลิกแล้ว' };
+  const st = { token: null, admin: null, positions: [], tab: 'dash', busy: false, report: null, reportKey: null, notified: false };
+
+  // ---------- helpers ----------
+  function el(tag, props, ...kids) {
+    const e = document.createElement(tag);
+    for (const k in (props || {})) {
+      if (k === 'class') e.className = props[k];
+      else if (k === 'text') e.textContent = props[k];
+      else if (k.indexOf('on') === 0) e.addEventListener(k.slice(2), props[k]);
+      else e.setAttribute(k, props[k]);
+    }
+    kids.flat().forEach(c => { if (c != null) e.append(c.nodeType ? c : document.createTextNode(c)); });
+    return e;
+  }
+  function parseYmd(s) { const p = s.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
+  function fmtDate(s) { return s ? parseYmd(s).toLocaleDateString(TH, { day: 'numeric', month: 'short', year: 'numeric' }) : '-'; }
+  function fmtTs(s) { if (!s) return '-'; const a = s.split(' '); return fmtDate(a[0]) + (a[1] ? ' ' + a[1] + ' น.' : ''); }
+  const alertBox = (icon, text) => Swal.fire({ icon: icon, text: text, confirmButtonText: 'ตกลง' });
+  const toast = t => Swal.fire({ toast: true, position: 'top', icon: 'success', title: t, timer: 2500, showConfirmButton: false });
+  // ---------- ไอคอน (sprite อยู่ใน Icons.html) ----------
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function ic(name) {
+    const s = document.createElementNS(SVGNS, 'svg'), u = document.createElementNS(SVGNS, 'use');
+    s.setAttribute('class', 'ic'); s.setAttribute('aria-hidden', 'true');
+    u.setAttribute('href', '#i-' + name); s.append(u);
+    return s;
+  }
+  const STATUS_IC = { Pending: 'clock', Approve: 'circle-check', Reject: 'circle-x', Cancelled: 'ban' };
+  const badge = status => el('span', { class: 'badge bi st-' + status }, ic(STATUS_IC[status] || 'clock'), STATUS_TH[status] || status);
+  /** ปุ่มไอคอนอย่างเดียว (มี title + aria-label เสมอ) */
+  // ปุ่ม "ยกเลิกใบลา": ขอบแดงอ่อน พื้นแดงจาง มีไอคอน+ข้อความ (หน้าตาเดียวกับใน Admin Center)
+  (function () { const t = document.createElement('style'); t.textContent = '.cx-btn{display:inline-flex;align-items:center;gap:6px;min-height:2rem;padding:4px 12px;border:1px solid #FECACA;border-radius:9px;background:#FEF2F2;color:#B91C1C;font:inherit;font-size:.82rem;font-weight:600;cursor:pointer;transition:background .12s,border-color .12s}.cx-btn .ic{width:14px;height:14px;stroke-width:2.2}.cx-btn:hover{background:#FEE2E2;border-color:#FCA5A5}.cx-btn:active{transform:translateY(1px)}.cx-btn:focus-visible{outline:2px solid #DC2626;outline-offset:2px}'; document.head.append(t); })();
+  const cancelBtn = onclick => el('button', { type: 'button', class: 'cx-btn', title: 'ยกเลิกใบลาที่อนุมัติแล้ว', onclick: onclick }, ic('ban'), 'ยกเลิกใบลา');
+  const iconBtn = (icon, label, cls, onclick) => el('button', { type: 'button', class: cls + ' btn-icon', title: label, 'aria-label': label, onclick: onclick }, ic(icon));
+  function busyBtn(btn, on, text) {
+    const u = btn.querySelector('use'), t = btn.querySelector('.bt');
+    if (on) { btn.dataset.ic = u.getAttribute('href'); btn.dataset.tx = t.textContent; u.setAttribute('href', '#i-loader'); t.textContent = text; btn.classList.add('busy'); }
+    else { u.setAttribute('href', btn.dataset.ic); t.textContent = btn.dataset.tx; btn.classList.remove('busy'); }
+    btn.disabled = on;
+  }
+  const emptyRow = (cols, text) => el('tr', {}, el('td', { colspan: String(cols), class: 'empty', text: text }));
+
+  function call(name, args) {
+    return new Promise(resolve => {
+      google.script.run
+        .withSuccessHandler(r => resolve(r || { ok: false, message: 'ไม่ได้รับการตอบกลับจากระบบ' }))
+        .withFailureHandler(() => resolve({ ok: false, message: 'เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่' }))
+        [name](...args);
+    });
+  }
+  async function api(name, ...args) {
+    const r = await call(name, args);
+    if (!r.ok) console.warn('[API ล้มเหลว]', name, r);   // ดูได้ที่ Console ว่าคำสั่งไหนล้ม
+    if (!r.ok && r.code === 'AUTH') { resetSession(); show('screenLogin'); $('loginError').textContent = r.message; }
+    return r;
+  }
+  function show(screen) {
+    ['screenLoading', 'screenLogin', 'screenApp'].forEach(id => { $(id).hidden = id !== screen; });
+    $('userBar').hidden = !st.token;
+  }
+  function resetSession() {
+    st.token = null; st.admin = null; st.report = null; st.reportKey = null; st.notified = false;
+    ['leavesBody', 'staffBody', 'adminsBody'].forEach(id => $(id).replaceChildren());
+    $('uPass').value = '';
+  }
+
+  /** กล่องฟอร์มเล็กๆ ใน SweetAlert2 สร้างด้วย DOM (ไม่ใช้ innerHTML) */
+  async function formDialog(title, fields, confirmText) {
+    const inputs = {};
+    fields.forEach(f => {
+      let i;
+      if (f.type === 'select') { i = el('select', {}, f.options.map(o => el('option', { value: o, text: o }))); i.value = f.value || f.options[0]; }
+      else if (f.type === 'checkbox') { i = el('input', { type: 'checkbox' }); i.checked = !!f.value; }
+      else { i = el('input', { type: f.type || 'text', maxlength: String(f.max || 100), autocomplete: 'off' }); i.value = f.value || ''; if (f.disabled) i.disabled = true; }
+      inputs[f.key] = i;
+    });
+    const ctl = f => f.type === 'checkbox'
+      ? el('label', { class: 'check' }, inputs[f.key], f.label)
+      : el('div', { class: 'field' }, el('span', { class: 'lbl', text: f.label }), inputs[f.key]);
+    const kids = [], sws = fields.filter(f => f.sw);
+    fields.filter(f => !f.sw).forEach(f => kids.push(ctl(f)));
+    if (sws.length) { kids.push(el('div', { class: 'lbl', text: 'สิทธิ์เข้าใช้งานแต่ละระบบ' })); kids.push(el('div', { class: 'swfield' }, sws.map(ctl))); }
+    const body = el('div', { class: 'dform' }, kids);
+    const r = await Swal.fire({
+      title: title, html: body, showCancelButton: true, focusConfirm: false,
+      confirmButtonText: confirmText || 'บันทึก', cancelButtonText: 'ยกเลิก',
+      preConfirm: () => {
+        const v = {};
+        for (const f of fields) {
+          const i = inputs[f.key];
+          v[f.key] = f.type === 'checkbox' ? i.checked : i.value;
+          if (f.required && !String(v[f.key]).trim()) { Swal.showValidationMessage('กรุณากรอก' + f.label); return false; }
+        }
+        return v;
+      }
+    });
+    return r.isConfirmed ? r.value : null;
+  }
+
+  /** เรียก API เขียนข้อมูล แล้วแสดงผล + รีโหลดส่วนที่เกี่ยวข้อง */
+  async function act(name, args, after, successAlert) {
+    if (st.busy) return false;
+    st.busy = true;
+    const r = await api(name, ...args);
+    st.busy = false;
+    if (!r.ok) { if (r.code !== 'AUTH') alertBox('warning', r.message); if (r.code === 'STALE' && after) after(); return false; }
+    if (successAlert) alertBox('success', r.message); else toast(r.message);
+    if (after) after();
+    return true;
+  }
+  const confirmBox = (title, text, btn) => Swal.fire({ icon: 'question', title: title, text: text, showCancelButton: true, confirmButtonText: btn, cancelButtonText: 'ยกเลิก' }).then(r => r.isConfirmed);
+
+  // ---------- เริ่มระบบ / ล็อกอิน ----------
+  async function init() {
+    const r = await api('getBootstrap');
+    if (!r.ok) { $('loadingText').textContent = r.message; return; }
+    st.positions = r.positions;
+    fillPeriod();
+    show('screenLogin');
+  }
+
+  async function onLogin(ev) {
+    ev.preventDefault();
+    if (st.busy) return;
+    const btn = $('loginBtn'), err = $('loginError');
+    err.textContent = 'กำลังตรวจสอบ ครั้งแรกอาจใช้เวลาสักครู่...'; st.busy = true; busyBtn(btn, true, 'กำลังเข้าสู่ระบบ...');
+    const r = await api('adminLogin', $('uName').value, $('uPass').value);
+    st.busy = false; busyBtn(btn, false);
+    $('uPass').value = '';
+    if (!r.ok || !r.admin || !r.token) {
+      if (r.ok) console.warn('[adminLogin ตอบกลับรูปแบบไม่ตรง]', r);
+      err.textContent = r.message || 'เข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่';
+      return;
+    }
+    err.textContent = '';
+    st.token = r.token; st.admin = r.admin;
+    $('userName').textContent = r.admin.displayName;
+    show('screenApp');
+    setTab('dash');
+    loadSummary();
+  }
+
+  async function logout() {
+    const t = st.token; resetSession(); show('screenLogin');
+    if (t) call('adminLogout', [t]);
+  }
+
+  async function changeOwnPassword() {
+    const v = await formDialog('เปลี่ยนรหัสผ่านของฉัน', [
+      { key: 'old', label: 'รหัสผ่านเดิม', type: 'password', max: 200, required: true },
+      { key: 'n1', label: 'รหัสผ่านใหม่ (10 ตัวอักษรขึ้นไป)', type: 'password', max: 100, required: true },
+      { key: 'n2', label: 'ยืนยันรหัสผ่านใหม่', type: 'password', max: 100, required: true }]);
+    if (!v) return;
+    if (v.n1 !== v.n2) return alertBox('warning', 'รหัสผ่านใหม่ทั้งสองช่องไม่ตรงกัน');
+    act('adminChangeOwnPassword', [st.token, v.old, v.n1]);
+  }
+
+  // ---------- แท็บ ----------
+  function setTab(tab) {
+    st.tab = tab;
+    document.querySelectorAll('.tab').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+    ['dash', 'leaves', 'late', 'people', 'staff', 'requests', 'admins'].forEach(t => { const p = $('panel-' + t); if (p) p.hidden = t !== tab; });
+    $('periodBar').hidden = tab !== 'dash' && tab !== 'people';
+    ({ dash: loadReport, people: loadReport, leaves: loadLeaves, late: loadLate, staff: loadStaff, requests: loadRequests, admins: loadAdmins })[tab]();
+  }
+
+  async function loadSummary() {
+    const r = await api('adminSummary', st.token);
+    if (!r.ok) return;
+    $('badgePending').textContent = r.pending ? String(r.pending) : '';
+    $('badgeReq').textContent = r.pendingRequests ? String(r.pendingRequests) : '';
+    if (r.pendingRequests && !st.notified) {
+      st.notified = true;
+      Swal.fire({ toast: true, position: 'top-end', icon: 'info', title: 'มีคำขอเข้าใช้งานรอการอนุมัติ ' + r.pendingRequests + ' รายการ',
+        showConfirmButton: true, confirmButtonText: 'ดูคำขอ', timer: 10000, timerProgressBar: true }).then(x => { if (x.isConfirmed) setTab('requests'); });
+    }
+    const w = $('pinWarn'), n = r.staffNotChangedPin;
+    w.hidden = !n.length;
+    if (n.length) w.textContent = 'ยังไม่ได้เปลี่ยน PIN เริ่มต้น ' + n.length + ' คน: ' + n.join(', ');
+  }
+
+  // ---------- รายการลา ----------
+  /** ตัวกรองเดือน/ปี (แสดงเป็น พ.ศ.) -> 'YYYY-MM' | 'YYYY' | '' (ค่าที่ส่งให้เซิร์ฟเวอร์เป็น ค.ศ.) */
+  function monthFilter() {
+    const m = $('fMonthM').value; let y = $('fMonthY').value;
+    if (m && !y) y = String(new Date().getFullYear());
+    return y ? (m ? y + '-' + m : y) : '';
+  }
+  function fillMonthFilter() {
+    const y0 = new Date().getFullYear();
+    $('fMonthY').replaceChildren(el('option', { value: '', text: 'ทุกปี' }), ...[1, 0, -1, -2, -3].map(i => el('option', { value: String(y0 + i), text: String(y0 + i + 543) })));
+  }
+  async function loadLeaves() {
+    const body = $('leavesBody');
+    body.replaceChildren(emptyRow(6, 'กำลังโหลด...'));
+    const r = await api('adminGetLeaves', st.token, { status: $('fStatus').value, month: monthFilter(), q: $('fQ').value });
+    if (!r.ok) { if (r.code !== 'AUTH') body.replaceChildren(emptyRow(6, r.message)); return; }
+    $('leavesInfo').textContent = 'พบ ' + r.total + ' รายการ' + (r.total > r.rows.length ? ' (แสดง ' + r.rows.length + ' รายการล่าสุด ใช้ตัวกรองเพื่อจำกัดผล)' : '');
+    if (!r.rows.length) { body.replaceChildren(emptyRow(6, 'ไม่มีรายการ')); return; }
+    body.replaceChildren(...r.rows.map(row => {
+      const range = row.start === row.end ? fmtDate(row.start) : fmtDate(row.start) + ' ถึง ' + fmtDate(row.end);
+      let last;
+      if (row.status === 'Pending') {
+        last = row.id
+          ? el('div', { class: 'btns' },
+              iconBtn('check', 'อนุมัติ', 'btn-sm btn-ok', () => decide(row, 'Approve')),
+              iconBtn('x', 'ไม่อนุมัติ', 'btn-sm btn-no', () => decide(row, 'Reject')))
+          : el('span', { class: 'sub', text: 'ข้อมูลเก่ายังไม่มี ID (รัน migrateLegacyLeaveData)' });
+      } else {
+        const who = row.status === 'Cancelled' ? 'ยกเลิกโดย ' + (row.by || 'พนักงาน') + ' เมื่อ ' + fmtTs(row.at) : 'โดย ' + row.by + ' ' + fmtTs(row.at);
+        last = el('div', {}, badge(row.status),
+          row.by || row.at ? el('div', { class: 'sub', text: who }) : null,
+          row.note ? el('div', { class: 'note', text: 'หมายเหตุ: ' + row.note }) : null,
+          row.status === 'Approve' && row.id ? el('div', { style: 'margin-top:8px' }, cancelBtn(() => cancelApproved(row))) : null);
+      }
+      return el('tr', {},
+        el('td', { text: fmtTs(row.ts) }),
+        el('td', {}, el('div', { class: 'strong', text: row.name }), el('div', { class: 'sub', text: row.position })),
+        el('td', { text: row.type }),
+        el('td', { text: range }),
+        el('td', { class: 'c', text: String(row.days) }),
+        el('td', {}, last));
+    }));
+  }
+
+  async function decide(row, decision) {
+    const ok = decision === 'Approve';
+    const r = await Swal.fire({
+      icon: 'question', title: (ok ? 'อนุมัติ' : 'ไม่อนุมัติ') + 'ใบลานี้?',
+      text: row.name + ' | ' + row.type + ' ' + row.days + ' วัน | ' + fmtDate(row.start) + (row.start === row.end ? '' : ' ถึง ' + fmtDate(row.end)),
+      input: 'text', inputLabel: 'หมายเหตุ (ไม่บังคับ)', inputAttributes: { maxlength: '200' },
+      showCancelButton: true, confirmButtonText: ok ? 'อนุมัติ' : 'ไม่อนุมัติ', cancelButtonText: 'ยกเลิก',
+      confirmButtonColor: ok ? '#16A34A' : '#DC2626'
+    });
+    if (!r.isConfirmed) return;
+    act('adminDecide', [st.token, row.id, decision, r.value || ''], () => { st.reportKey = null; loadLeaves(); loadSummary(); });
+  }
+
+  /** แอดมินยกเลิกใบลาที่อนุมัติแล้ว (ต้องระบุเหตุผล) */
+  async function cancelApproved(row) {
+    const r = await Swal.fire({
+      icon: 'warning', title: 'ยกเลิกใบลาที่อนุมัติแล้ว?',
+      text: row.name + ' | ' + row.type + ' ' + row.days + ' วัน | ' + fmtDate(row.start) + (row.start === row.end ? '' : ' ถึง ' + fmtDate(row.end)) + ' — ใบลาจะหลุดจากปฏิทินและรายงานทันที',
+      input: 'text', inputLabel: 'เหตุผลการยกเลิก (จำเป็น)', inputAttributes: { maxlength: '200' },
+      inputValidator: v => (v && v.trim()) ? undefined : 'กรุณาระบุเหตุผล',
+      showCancelButton: true, confirmButtonText: 'ยืนยันยกเลิกใบลา', cancelButtonText: 'ไม่ยกเลิก', confirmButtonColor: '#DC2626'
+    });
+    if (!r.isConfirmed) return;
+    act('adminCancelLeave', [st.token, row.id, r.value || ''], () => { st.reportKey = null; loadLeaves(); loadSummary(); });
+  }
+
+  // ---------- สิทธิ์ใช้งานรายระบบ (คอลัมน์ J-M ของชีต Staff) ----------
+  const SYS_LIST = [['leave', 'ระบบแจ้งลา'], ['stock', 'Stock หน่วย'], ['stockcenter', 'Stock คลังกลาง'], ['incident', 'อุบัติการณ์'], ['bloodgas', 'Blood Gas'], ['glucose', 'Glucose']];
+  function sysChips(sys) {
+    return el('div', { class: 'sysls' }, SYS_LIST.map(x => {
+      const on = !!(sys && sys[x[0]]);
+      return el('div', { class: 'sysrow ro' + (on ? ' on' : ''), title: on ? 'เปิดสิทธิ์อยู่' : 'ปิดสิทธิ์' }, el('i', { class: 'dot' }), el('span', { text: x[1] }));
+    }));
+  }
+  // สวิตช์เปิด/ปิดสิทธิ์ในหน้าต่างเพิ่ม/แก้ไข (เพิ่มใหม่ = เปิดครบทุกระบบเป็นค่าเริ่มต้น)
+  function sysFields(sys) {
+    return SYS_LIST.map(x => ({ key: 'sys_' + x[0], label: x[1], type: 'checkbox', sw: true, value: sys ? !!sys[x[0]] : true }));
+  }
+  function sysFromForm(v) {
+    const o = {}; SYS_LIST.forEach(x => { o[x[0]] = v['sys_' + x[0]] === true; }); return o;
+  }
+
+  // ---------- พนักงาน ----------
+  async function loadStaff() {
+    const body = $('staffBody');
+    body.replaceChildren(emptyRow(6, 'กำลังโหลด...'));
+    const r = await api('adminListStaff', st.token);
+    if (!r.ok) { if (r.code !== 'AUTH') body.replaceChildren(emptyRow(6, r.message)); return; }
+    if (!r.rows.length) { body.replaceChildren(emptyRow(6, 'ยังไม่มีพนักงาน กด "เพิ่มพนักงาน"')); return; }
+    r.rows.sort((a, b) => a.name.localeCompare(b.name, 'th'));
+    body.replaceChildren(...r.rows.map(s => el('tr', { class: s.active ? '' : 'off' },
+      el('td', { class: 'strong', text: s.name }),
+      el('td', { text: s.position }),
+      el('td', { class: 'c' }, s.active ? 'ใช้งาน' : 'ปิดใช้งาน', s.locked ? el('div', { class: 'lockedtag', text: 'ถูกล็อก' }) : null),
+      el('td', { class: 'c', text: s.mustChangePin ? 'ยังเป็น PIN เริ่มต้น' : 'ตั้งแล้ว' }),
+      el('td', {}, sysChips(s.sys)),
+      el('td', {}, el('div', { class: 'btns' },
+        iconBtn('pencil', 'แก้ไข', 'btn-ghost', () => editStaff(s)),
+        s.locked ? iconBtn('lock', 'ปลดล็อกบัญชี', 'btn-ghost', () => unlockStaff(s)) : null,
+        iconBtn('rotate-ccw', 'รีเซ็ต PIN', 'btn-ghost', () => resetPin(s)),
+        iconBtn('trash', 'ลบพนักงาน', 'btn-ghost danger', () => deleteStaff(s)))))));
+  }
+
+  async function addStaff() {
+    const v = await formDialog('เพิ่มพนักงาน', [
+      { key: 'name', label: 'ชื่อ-นามสกุล', max: 80, required: true },
+      { key: 'position', label: 'ตำแหน่ง', type: 'select', options: st.positions }].concat(sysFields(null)), 'เพิ่ม');
+    if (v) act('adminSaveStaff', [st.token, { name: v.name, position: v.position, active: true, sys: sysFromForm(v) }], () => { st.reportKey = null; loadStaff(); loadSummary(); }, true);
+  }
+
+  async function editStaff(s) {
+    const v = await formDialog('แก้ไขพนักงาน', [
+      { key: 'name', label: 'ชื่อ-นามสกุล', value: s.name, max: 80, required: true },
+      { key: 'position', label: 'ตำแหน่ง', type: 'select', options: st.positions, value: s.position },
+      { key: 'active', label: 'เปิดใช้งาน', type: 'checkbox', value: s.active }].concat(sysFields(s.sys)));
+    if (v) act('adminSaveStaff', [st.token, { id: s.id, name: v.name, position: v.position, active: v.active, sys: sysFromForm(v) }], () => { st.reportKey = null; loadStaff(); loadSummary(); });
+  }
+
+  function unlockStaff(s) { act('adminUnlockStaff', [st.token, s.id], () => loadStaff(), true); }
+
+  async function resetPin(s) {
+    if (await confirmBox('รีเซ็ต PIN?', s.name + ' จะต้องตั้ง PIN ใหม่ตอนเข้าครั้งถัดไป', 'รีเซ็ต PIN')) {
+      act('adminResetStaffPin', [st.token, s.id], () => { loadStaff(); loadSummary(); }, true);
+    }
+  }
+
+  async function deleteStaff(s) {
+    const ok = await confirmBox('ลบพนักงาน?', 'ลบ ' + s.name + ' ออกจากรายชื่อ ประวัติการลาเดิมยังอยู่ แต่เขาจะเข้าสู่ระบบไม่ได้ ถ้าแค่ไม่ต้องการให้แสดงในรายการ แนะนำใช้ "แก้ไข" แล้วปิดการใช้งานแทน', 'ลบ');
+    if (ok) act('adminDeleteStaff', [st.token, s.id], () => { st.reportKey = null; loadStaff(); loadSummary(); });
+  }
+
+  // ---------- ผู้ดูแลระบบ ----------
+  async function loadAdmins() {
+    const body = $('adminsBody');
+    body.replaceChildren(emptyRow(4, 'กำลังโหลด...'));
+    const r = await api('adminListAdmins', st.token);
+    if (!r.ok) { if (r.code !== 'AUTH') body.replaceChildren(emptyRow(4, r.message)); return; }
+    body.replaceChildren(...r.rows.map(a => {
+      const me = a.username === st.admin.username;
+      return el('tr', { class: a.active ? '' : 'off' },
+        el('td', { class: 'strong', text: a.username + (me ? ' (คุณ)' : '') }),
+        el('td', { text: a.displayName }),
+        el('td', { class: 'c', text: a.active ? 'ใช้งาน' : 'ปิดใช้งาน' }),
+        el('td', {}, el('div', { class: 'btns' },
+          iconBtn('pencil', 'แก้ไข', 'btn-ghost', () => editAdmin(a)),
+          me ? null : iconBtn('rotate-ccw', 'ตั้งรหัสผ่านใหม่', 'btn-ghost', () => resetAdminPw(a)),
+          me ? null : iconBtn('trash', 'ลบผู้ดูแล', 'btn-ghost danger', () => deleteAdmin(a)))));
+    }));
+  }
+
+  async function addAdmin() {
+    const v = await formDialog('เพิ่มผู้ดูแลระบบ', [
+      { key: 'username', label: 'ชื่อผู้ใช้ (a-z 0-9 _ . - อย่างน้อย 3 ตัว)', max: 30, required: true },
+      { key: 'displayName', label: 'ชื่อที่แสดง', max: 60, required: true },
+      { key: 'password', label: 'รหัสผ่านเริ่มต้น (10 ตัวอักษรขึ้นไป)', type: 'password', max: 100, required: true }], 'เพิ่ม');
+    if (v) act('adminAddAdmin', [st.token, v], loadAdmins);
+  }
+
+  async function editAdmin(a) {
+    const me = a.username === st.admin.username;
+    const v = await formDialog('แก้ไขผู้ดูแล ' + a.username, [
+      { key: 'displayName', label: 'ชื่อที่แสดง', value: a.displayName, max: 60, required: true },
+      { key: 'active', label: me ? 'เปิดใช้งาน (ปิดบัญชีตัวเองไม่ได้)' : 'เปิดใช้งาน', type: 'checkbox', value: a.active }]);
+    if (v) act('adminUpdateAdmin', [st.token, { username: a.username, displayName: v.displayName, active: me ? true : v.active }], () => {
+      if (me) { st.admin.displayName = v.displayName; $('userName').textContent = v.displayName; }
+      loadAdmins();
+    });
+  }
+
+  async function resetAdminPw(a) {
+    const v = await formDialog('ตั้งรหัสผ่านใหม่ให้ ' + a.username, [
+      { key: 'pw', label: 'รหัสผ่านใหม่ (10 ตัวอักษรขึ้นไป)', type: 'password', max: 100, required: true }]);
+    if (v) act('adminResetAdminPassword', [st.token, a.username, v.pw]);
+  }
+
+  async function deleteAdmin(a) {
+    if (await confirmBox('ลบผู้ดูแล?', 'ลบบัญชี ' + a.username + ' (' + a.displayName + ') ถาวร', 'ลบ')) act('adminDeleteAdmin', [st.token, a.username], loadAdmins);
+  }
+
+  // ---------- ช่วงเวลา / แดชบอร์ด / สรุปรายบุคคล ----------
+  const MONTH_TH = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  function periodList() {
+    const now = new Date(), y = now.getFullYear(), fy = now.getMonth() >= 9 ? y + 1 : y;  // ปีงบประมาณเริ่ม 1 ต.ค.
+    const out = [];
+    for (let i = 0; i < 4; i++) out.push({ v: 'f' + (fy - i), t: 'ปีงบประมาณ ' + (fy - i + 543) + ' (ต.ค.-ก.ย.)' });
+    for (let i = 0; i < 3; i++) out.push({ v: 'c' + (y - i), t: 'ปีปฏิทิน ' + (y - i + 543) });
+    return out;
+  }
+  function periodRange(v) {
+    const y = Number(v.slice(1));
+    return v[0] === 'f' ? { from: (y - 1) + '-10-01', to: y + '-09-30' } : { from: y + '-01-01', to: y + '-12-31' };
+  }
+  function fillPeriod() { $('period').replaceChildren(...periodList().map(p => el('option', { value: p.v, text: p.t }))); }
+  function thDate(s) {
+    if (!s) return '';
+    const a = s.split(' '), d = a[0].split('-');
+    return d[2] + '/' + d[1] + '/' + (Number(d[0]) + 543) + (a[1] ? ' ' + a[1] : '');
+  }
+  const rangeText = d => d.start === d.end ? fmtDate(d.start) : fmtDate(d.start) + ' - ' + fmtDate(d.end);
+
+  async function loadReport(force) {
+    const key = $('period').value;
+    if (st.report && st.reportKey === key && force !== true) { renderReport(); return; }
+    $('statTiles').replaceChildren(el('div', { class: 'tile', text: 'กำลังโหลด...' }));
+    const rg = periodRange(key);
+    const r = await api('adminReport', st.token, rg.from, rg.to);
+    if (!r.ok) { if (r.code !== 'AUTH') alertBox('warning', r.message); return; }
+    st.report = r; st.reportKey = key;
+    renderReport();
+  }
+
+  function tile(label, value, unit, tone) {
+    return el('div', { class: 'tile' + (tone ? ' ' + tone : '') }, el('div', { class: 'tile-label', text: label }),
+      el('div', { class: 'tile-value' }, String(value), unit ? el('small', { text: ' ' + unit }) : null));
+  }
+
+  function fillList(id, items, emptyText) {
+    $(id).replaceChildren(...(items.length ? items.map(d => el('div', { class: 'li' },
+      el('div', {}, el('div', { class: 'strong', text: d.name }), el('div', { class: 'sub', text: d.type + ' ' + d.days + ' วัน' })),
+      el('div', { class: 'li-r' }, el('div', { text: rangeText(d) }), d.status === 'Pending' ? badge('Pending') : null)))
+      : [el('p', { class: 'hint', text: emptyText })]));
+  }
+
+  function renderReport() {
+    const r = st.report; if (!r) return;
+    const t = r.totals;
+    $('statTiles').replaceChildren(tile('รออนุมัติทั้งหมด', t.pendingNow, 'รายการ', 'warn'), tile('วันลาที่อนุมัติ (ช่วงนี้)', t.approvedDays, 'วัน'),
+      tile('ใบลาในช่วงนี้', t.requests, 'ใบ'), tile('ลาอยู่วันนี้', t.onLeaveToday, 'คน'));
+    const tmax = Math.max(1, ...r.byType.map(x => x.days));
+    $('chartType').replaceChildren(...r.byType.map(x => el('div', { class: 'hbar' },
+      el('span', { class: 'hbar-l', text: x.label }),
+      el('span', { class: 'hbar-t' }, el('span', { class: 'hbar-f', style: 'width:' + (x.days / tmax * 100) + '%' })),
+      el('span', { class: 'hbar-v', text: x.days + ' วัน' }))));
+    const mmax = Math.max(1, ...r.byMonth.map(x => x.days));
+    $('chartMonth').replaceChildren(...r.byMonth.map(x => el('div', { class: 'vbar' },
+      el('span', { class: 'vbar-v', text: x.days ? String(x.days) : '' }),
+      el('span', { class: 'vbar-area' }, el('span', { class: 'vbar-f', style: 'height:' + (x.days / mmax * 100) + '%' })),
+      el('span', { class: 'vbar-l', text: MONTH_TH[Number(x.month.slice(5)) - 1] }))));
+    fillList('listToday', r.onLeave, 'ไม่มีผู้ลาในวันนี้');
+    fillList('listUpcoming', r.upcoming, 'ไม่มีการลาใน 14 วันข้างหน้า');
+    renderPeople();
+  }
+
+  function renderPeople() {
+    const r = st.report; if (!r) return;
+    const q = $('pQ').value.trim().toLowerCase();
+    $('peopleHead').replaceChildren(el('tr', {}, el('th', { text: 'ชื่อ-ตำแหน่ง' }), r.labels.map(l => el('th', { class: 'c', text: l })),
+      el('th', { class: 'c', text: 'รวมอนุมัติ (วัน)' }), el('th', { class: 'c', text: 'รออนุมัติ (วัน)' }), el('th', { class: 'c', text: 'จำนวนใบลา' })));
+    const rows = r.people.filter(p => !q || p.name.toLowerCase().indexOf(q) >= 0);
+    $('peopleBody').replaceChildren(...(rows.length ? rows.map(p => el('tr', {},
+      el('td', {}, el('div', { class: 'strong', text: p.name }), el('div', { class: 'sub', text: p.position })),
+      p.byType.map(n => el('td', { class: 'c', text: n ? String(n) : '-' })),
+      el('td', { class: 'c strong', text: String(p.approved) }),
+      el('td', { class: 'c', text: p.pending ? String(p.pending) : '-' }),
+      el('td', { class: 'c', text: String(p.requests) }))) : [emptyRow(r.labels.length + 4, 'ไม่พบข้อมูล')]));
+  }
+
+  // ---------- ส่งออก CSV ----------
+  function csvCell(v) {
+    let s = String(v == null ? '' : v);
+    if (/^[=+\-@]/.test(s)) s = "'" + s;   // กัน formula injection เมื่อเปิดใน Excel
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  function downloadCsv(name, rows) {
+    const blob = new Blob(['\uFEFF' + rows.map(r => r.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: name });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+  function exportPeople() {
+    const r = st.report; if (!r) return alertBox('info', 'ยังไม่มีข้อมูลรายงาน กรุณารอโหลดสักครู่');
+    downloadCsv('leave_people_' + $('period').value + '.csv',
+      [['ชื่อ-นามสกุล', 'ตำแหน่ง'].concat(r.labels, ['รวมอนุมัติ (วัน)', 'รออนุมัติ (วัน)', 'จำนวนใบลา'])]
+        .concat(r.people.map(p => [p.name, p.position].concat(p.byType, [p.approved, p.pending, p.requests]))));
+  }
+  async function exportRows() {
+    const rg = periodRange($('period').value);
+    const r = await api('adminExportRows', st.token, rg.from, rg.to);
+    if (!r.ok) { if (r.code !== 'AUTH') alertBox('warning', r.message); return; }
+    downloadCsv('leave_records_' + $('period').value + '.csv',
+      [['ส่งเมื่อ', 'ชื่อ-นามสกุล', 'ตำแหน่ง', 'ประเภท', 'วันแรกที่ลา', 'วันสุดท้ายที่ลา', 'จำนวนวัน', 'สถานะ', 'ผู้ดำเนินการ', 'เวลาดำเนินการ', 'หมายเหตุ']]
+        .concat(r.rows.map(d => [thDate(d.ts), d.name, d.position, d.type, thDate(d.start), thDate(d.end), d.days, STATUS_TH[d.status] || d.status, d.by, thDate(d.at), d.note])));
+    if (r.total > r.rows.length) alertBox('info', 'ส่งออกได้สูงสุด ' + r.rows.length + ' รายการ จากทั้งหมด ' + r.total + ' กรุณาเลือกช่วงเวลาที่สั้นลง');
+  }
+
+  // ---------- คำขอเข้าใช้งาน ----------
+  async function loadRequests() {
+    const body = $('reqBody');
+    body.replaceChildren(emptyRow(4, 'กำลังโหลด...'));
+    const r = await api('adminListRequests', st.token, $('rStatus').value);
+    if (!r.ok) { if (r.code !== 'AUTH') body.replaceChildren(emptyRow(4, r.message)); return; }
+    if (!r.rows.length) { body.replaceChildren(emptyRow(4, 'ไม่มีคำขอ')); return; }
+    body.replaceChildren(...r.rows.map(q => el('tr', {},
+      el('td', {}, el('div', { class: 'strong', text: q.name }), el('div', { class: 'sub', text: q.position })),
+      el('td', { text: q.contact || '-' }),
+      el('td', { text: fmtTs(q.ts) }),
+      el('td', {}, q.status === 'Pending'
+        ? el('div', { class: 'btns' },
+            iconBtn('check', 'อนุมัติให้เข้าใช้งาน', 'btn-sm btn-ok', () => decideRequest(q, 'Approve')),
+            iconBtn('x', 'ปฏิเสธคำขอ', 'btn-sm btn-no', () => decideRequest(q, 'Reject')))
+        : el('div', {}, badge(q.status),
+            q.by ? el('div', { class: 'sub', text: 'โดย ' + q.by + ' ' + fmtTs(q.at) }) : null,
+            q.note ? el('div', { class: 'note', text: 'หมายเหตุ: ' + q.note }) : null)))));
+  }
+
+  async function decideRequest(q, decision) {
+    const ok = decision === 'Approve';
+    const r = await Swal.fire(Object.assign({
+      icon: 'question', title: ok ? 'อนุมัติให้เข้าใช้งาน?' : 'ปฏิเสธคำขอ?',
+      text: q.name + ' | ' + q.position + (q.contact ? ' | ติดต่อ: ' + q.contact : ''),
+      showCancelButton: true, confirmButtonText: ok ? 'อนุมัติและเพิ่มชื่อ' : 'ปฏิเสธ', cancelButtonText: 'ยกเลิก',
+      confirmButtonColor: ok ? '#16A34A' : '#DC2626'
+    }, ok ? {} : { input: 'text', inputLabel: 'เหตุผล (ไม่บังคับ)', inputAttributes: { maxlength: '200' } }));
+    if (!r.isConfirmed) return;
+    act('adminDecideRequest', [st.token, q.id, decision, r.value || ''], () => { st.reportKey = null; loadRequests(); loadSummary(); }, ok);
+  }
+
+  $('period').addEventListener('change', () => loadReport(true));
+  $('pQ').addEventListener('input', renderPeople);
+  $('btnExportPeople').addEventListener('click', exportPeople);
+  $('btnExportRows').addEventListener('click', exportRows);
+  $('rStatus').addEventListener('change', loadRequests);
+  $('btnClearReq').addEventListener('click', async () => {
+    if (!(await confirmBox('ล้างคำขอที่ค้างทั้งหมด?', 'ทุกคำขอที่ยังรออนุมัติจะถูกปฏิเสธ (ใช้เมื่อมีสแปม) ย้อนกลับไม่ได้', 'ล้างทั้งหมด'))) return;
+    act('adminClearRequests', [st.token], () => { st.reportKey = null; loadRequests(); loadSummary(); });
+  });
+
+  // ---------- ตารางสรุปภาพรวมการลารายเดือน (Modal เต็มจอ) ----------
+  const SYMBOL_COLORS = { V: '#dc3545', P: '#6f42c1', S: '#198754', F: '#0d6efd', O: '#fd7e14' };
+  const MONTH_FULL = ['', 'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+  let matrixReq = 0;
+
+  function openLeaveOverviewModal() {
+    const modal = $('leaveOverviewModal'); if (!modal || !st.token) return;
+    const now = new Date();
+    $('overviewYear').replaceChildren(...[-2, -1, 0, 1, 2].map(i => { const y = now.getFullYear() + i; return el('option', { value: String(y), text: String(y + 543) }); }));
+    $('overviewYear').value = String(now.getFullYear());
+    $('overviewMonth').value = String(now.getMonth() + 1);
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    loadLeaveMatrixData();
+  }
+
+  function closeLeaveOverviewModal() {
+    const modal = $('leaveOverviewModal');
+    if (modal) modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+
+  async function loadLeaveMatrixData() {
+    const n = ++matrixReq;
+    const msg = text => $('matrixBody').replaceChildren(el('tr', {}, el('td', { colspan: '40', style: 'padding:20px;text-align:center', text: text })));
+    $('matrixHead').replaceChildren();
+    msg('กำลังโหลดข้อมูล...');
+    const r = await api('getMonthlyLeaveMatrix', st.token, $('overviewMonth').value, $('overviewYear').value);
+    if (n !== matrixReq) return;   // คำตอบเก่าที่มาช้า ทิ้ง
+    if (!r.ok) { if (r.code === 'AUTH') closeLeaveOverviewModal(); else msg(r.message); return; }
+    renderLeaveMatrixTable(r);
+  }
+
+  /** สร้างตารางด้วย DOM (ไม่ใช้ innerHTML) เพราะชื่อพนักงานมาจากข้อมูลที่ผู้ใช้กรอกได้ */
+  function renderLeaveMatrixTable(res) {
+    const head = $('matrixHead'), body = $('matrixBody');
+    if (!res.staffs.length) { head.replaceChildren(); body.replaceChildren(el('tr', {}, el('td', { colspan: '40', style: 'padding:20px;text-align:center', text: 'ไม่พบข้อมูลพนักงาน' }))); return; }
+    const days = res.daysInMonth, Y = '#ffe680', G = '#d9d9d9', S2 = '#fff2cc';
+    const weekend = d => { const w = new Date(res.year, res.month - 1, d).getDay(); return w === 0 || w === 6; };
+    const sumHead = text => el('th', { class: 'col-summary', style: 'background-color:' + Y + ';text-align:center;vertical-align:middle;white-space:pre-line', text: text });
+
+    const dayCells = [];
+    for (let d = 1; d <= days; d++) dayCells.push(el('th', { style: 'background-color:' + (weekend(d) ? G : Y) + ';text-align:center;min-width:28px', text: String(d) }));
+    head.replaceChildren(
+      el('tr', {},
+        el('th', { rowspan: '2', class: 'col-name', style: 'background-color:' + Y + ';text-align:center;vertical-align:middle', text: 'รายชื่อ' }),
+        el('th', { colspan: String(days), style: 'background-color:' + Y + ';text-align:center' }, 'เดือน ' + MONTH_FULL[res.month] + ' ', el('span', { style: 'color:red', text: String(res.year + 543) })),
+        el('th', { colspan: '6', style: 'background-color:' + Y + ';text-align:center', text: 'จำนวนทำการ วัน' })),
+      el('tr', {}, dayCells, sumHead('จำนวน\nวันลาพัก\nผ่อน'), sumHead('จำนวน\nวันลา\nกิจ'), sumHead('จำนวน\nวันลา\nป่วย'), sumHead('จำนวน\nงดเวร\nนอกเวลา'), sumHead('จำนวน\nวันขาด\nเวร\n6.00-8.30'), sumHead('รวม')));
+
+    body.replaceChildren(...res.staffs.map(staff => {
+      const leaves = res.leaveMap[staff.id] || {};
+      const cnt = { V: 0, P: 0, S: 0, O: 0, F: 0 };
+      const cells = [];
+      for (let d = 1; d <= days; d++) {
+        const sym = leaves[d] || '';
+        if (cnt[sym] !== undefined) cnt[sym]++;
+        cells.push(el('td', { style: (weekend(d) ? 'background-color:' + G + ';' : '') + (SYMBOL_COLORS[sym] ? 'color:' + SYMBOL_COLORS[sym] + ';' : '') + 'text-align:center;font-weight:bold', text: sym }));
+      }
+      const sumCell = (v, bold) => el('td', { style: 'background-color:' + S2 + ';text-align:center' + (bold ? ';font-weight:bold' : ''), text: String(v) });
+      return el('tr', {},
+        el('td', { class: 'col-name', style: 'text-align:left;white-space:nowrap;padding-left:8px', text: staff.name }),
+        cells, sumCell(cnt.V), sumCell(cnt.P), sumCell(cnt.S), sumCell(cnt.O), sumCell(cnt.F), sumCell(cnt.V + cnt.P + cnt.S + cnt.F, true));
+    }));
+  }
+
+  // ---------- ปฏิทินวันลา: พรีวิว + ส่งออก PDF (พิมพ์เป็น PDF ด้วยเบราว์เซอร์) ----------
+  const CAL_TYPES = { V: 'ลาพักผ่อน', P: 'ลากิจ', S: 'ลาป่วย', O: 'งดเวรนอกเวลา' };
+  const CAL_ORDER = ['V', 'P', 'S', 'O'];
+  const DOW_TH = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์', 'เสาร์'];
+  const TITLES = /^(นางสาว|นาง|นาย|น\.ส\.|ทนพญ\.|ทนพ\.|ดร\.|พญ\.|นพ\.|ผศ\.|รศ\.|ศ\.)\s*/;
+  let calReq = 0;
+  /** ชื่อจริง (ตัดคำนำหน้า+นามสกุล); ถ้าซ้ำกันในเดือนนั้น เติมตัวอักษรแรกของนามสกุล */
+  function calNames(staffs) {
+    const parts = {};
+    staffs.forEach(s => {
+      const t = String(s.name || '').trim().replace(TITLES, '').split(/\s+/);
+      parts[s.id] = { first: t[0] || String(s.name || '').trim(), last: t.slice(1).join(' ') };
+    });
+    const cnt = {}; Object.values(parts).forEach(p => { cnt[p.first] = (cnt[p.first] || 0) + 1; });
+    const out = {};
+    Object.keys(parts).forEach(id => { const p = parts[id]; out[id] = cnt[p.first] > 1 && p.last ? p.first + ' ' + p.last.charAt(0) + '.' : p.first; });
+    return out;
+  }
+  function openLeavePdf() {
+    const m = $('calPdfModal'); if (!m || !st.token) return;
+    const now = new Date();
+    if (!$('calMonth').options.length) {
+      $('calMonth').replaceChildren(...MONTH_FULL.slice(1).map((n, i) => el('option', { value: String(i + 1), text: n })));
+      $('calYear').replaceChildren(...[-2, -1, 0, 1, 2].map(i => { const y = now.getFullYear() + i; return el('option', { value: String(y), text: String(y + 543) }); }));
+      $('calMonth').addEventListener('change', loadLeavePdf); $('calYear').addEventListener('change', loadLeavePdf);
+      $('btnCalPrint').addEventListener('click', () => { if ($('calSheet').dataset.ready === '1') window.print(); });
+    }
+    $('calMonth').value = String(now.getMonth() + 1); $('calYear').value = String(now.getFullYear());
+    m.style.display = 'flex'; document.body.style.overflow = 'hidden';
+    loadLeavePdf();
+  }
+  function closeLeavePdf() { const m = $('calPdfModal'); if (m) m.style.display = 'none'; document.body.style.overflow = ''; }
+  async function loadLeavePdf() {
+    const n = ++calReq, sheet = $('calSheet'); sheet.dataset.ready = '0';
+    sheet.replaceChildren(el('div', { class: 'empty', text: 'กำลังโหลดข้อมูล...' }));
+    const r = await api('getMonthlyLeaveMatrix', st.token, $('calMonth').value, $('calYear').value);
+    if (n !== calReq) return;
+    if (!r.ok) { if (r.code === 'AUTH') closeLeavePdf(); else sheet.replaceChildren(el('div', { class: 'empty', text: r.message })); return; }
+    renderLeaveCalendar(r);
+  }
+  function renderLeaveCalendar(res) {
+    const sheet = $('calSheet'), Y = res.year, M = res.month, days = res.daysInMonth;
+    const names = calNames(res.staffs), byDay = {}, tot = { V: 0, P: 0, S: 0, O: 0, F: 0 }, who = {};
+    Object.keys(res.leaveMap || {}).forEach(id => {
+      if (names[id] == null) return;                            // เฉพาะพนักงานที่ยังใช้งานอยู่ (เหมือนตารางสรุป)
+      const map = res.leaveMap[id];
+      Object.keys(map).forEach(d => { const sym = map[d]; if (!CAL_TYPES[sym]) return; (byDay[d] || (byDay[d] = [])).push({ sym: sym, name: names[id] }); tot[sym]++; who[id] = 1; });
+    });
+    let maxN = 0;
+    Object.keys(byDay).forEach(d => { byDay[d].sort((a, b) => CAL_ORDER.indexOf(a.sym) - CAL_ORDER.indexOf(b.sym) || a.name.localeCompare(b.name, 'th')); maxN = Math.max(maxN, byDay[d].length); });
+    const cols = maxN > 6 ? 2 : 1;
+    sheet.style.setProperty('--cols', String(cols));
+    sheet.style.setProperty('--fs', (cols === 2 ? 10.5 : 12) + 'px');
+    const badge = s => el('b', { class: 'bd bd-' + s, text: s });
+    const first = new Date(Y, M - 1, 1).getDay(), todayStr = new Date().toDateString();
+    const cells = [];
+    DOW_TH.forEach((d, i) => cells.push(el('div', { class: 'dow' + (i === 0 || i === 6 ? ' we' : ''), text: d })));
+    for (let i = 0; i < first; i++) cells.push(el('div', { class: 'cell blank' }));
+    for (let d = 1; d <= days; d++) {
+      const w = new Date(Y, M - 1, d).getDay(), list = byDay[d] || [];
+      const cell = el('div', { class: 'cell' + (w === 0 || w === 6 ? ' we' : '') + (new Date(Y, M - 1, d).toDateString() === todayStr ? ' today' : '') },
+        el('div', { class: 'dn' }, el('b', { text: String(d) }), list.length ? el('small', { text: list.length + ' คน' }) : null),
+        el('div', { class: 'ppl' }, list.map(x => el('div', { class: 'ce t-' + x.sym }, badge(x.sym), el('span', { class: 'nm', text: x.name })))));
+      cells.push(cell);
+    }
+    const rest = (7 - ((first + days) % 7)) % 7;
+    for (let i = 0; i < rest; i++) cells.push(el('div', { class: 'cell blank' }));
+    const legend = el('div', { class: 'lg' }, CAL_ORDER.map(s => el('span', {}, badge(s), CAL_TYPES[s] + ' (' + tot[s] + ')')));
+    const adminName = (st.admin && (st.admin.displayName || st.admin.username)) || '';
+    sheet.replaceChildren(
+      el('div', { class: 'ch' },
+        el('div', {}, el('h2', { text: 'ปฏิทินวันลา ประจำเดือน' + MONTH_FULL[M] + ' ' + (Y + 543) }), el('p', { text: 'หน่วยเจาะเลือด เก็บสิ่งส่งตรวจ และ POCT · แสดงเฉพาะการลาที่อนุมัติแล้ว' }))),
+      legend,
+      el('div', { class: 'grid' }, cells),
+      el('div', { class: 'ft' }, el('span', { text: 'พิมพ์เมื่อ ' + new Date().toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' }) + (adminName ? ' · โดย ' + adminName : '') })));
+    sheet.dataset.ready = '1';
+  }
+  window.openLeavePdf = openLeavePdf; window.closeLeavePdf = closeLeavePdf;
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLeavePdf(); });
+
+  window.openLeaveOverviewModal = openLeaveOverviewModal;
+  window.closeLeaveOverviewModal = closeLeaveOverviewModal;
+  window.loadLeaveMatrixData = loadLeaveMatrixData;
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLeaveOverviewModal(); });
+
+  // ---------- บันทึกมาสาย / ขาดเวร (F) ----------
+  const late = { req: 0, marked: {}, original: {}, leave: {}, dim: 0, dirty: false, prev: { s: '', m: '', y: '' } };
+  const WEEK_TH = ['อา', 'จ', 'อ', 'พ', 'พฤ', 'ศ', 'ส'];
+  const lateYM = () => ({ m: Number($('lateMonth').value), y: Number($('lateYear').value) });
+  const lateSnapshot = () => ({ s: $('lateStaff').value, m: $('lateMonth').value, y: $('lateYear').value });
+
+  async function loadLate() {
+    const ms = $('lateMonth'), ys = $('lateYear');
+    if (!ms.options.length) {
+      const now = new Date();
+      ms.replaceChildren(...MONTH_FULL.slice(1).map((n, i) => el('option', { value: String(i + 1), text: n })));
+      ys.replaceChildren(...[-2, -1, 0, 1].map(i => { const y = now.getFullYear() + i; return el('option', { value: String(y), text: String(y + 543) }); }));
+      ms.value = String(now.getMonth() + 1);
+      ys.value = String(now.getFullYear());
+    }
+    const r = await api('adminListStaff', st.token);
+    if (!r.ok) { if (r.code !== 'AUTH') alertBox('warning', r.message); return; }
+    const sel = $('lateStaff'), keep = sel.value;
+    const list = r.rows.filter(s => s.active).sort((a, b) => a.name.localeCompare(b.name, 'th'));
+    sel.replaceChildren(el('option', { value: '', text: 'เลือกพนักงาน' }), ...list.map(s => el('option', { value: s.id, text: s.name })));
+    if (keep && list.some(s => s.id === keep)) sel.value = keep;
+    late.prev = lateSnapshot();
+    loadLateCalendar();
+  }
+
+  async function loadLateCalendar() {
+    const id = $('lateStaff').value, box = $('lateCal');
+    late.marked = {}; late.original = {}; late.leave = {}; late.dirty = false;
+    if (!id) { box.replaceChildren(el('p', { class: 'hint', text: 'เลือกพนักงานเพื่อแสดงปฏิทิน' })); updateLateInfo(); return; }
+    const n = ++late.req, ym = lateYM();
+    box.replaceChildren(el('p', { class: 'hint', text: 'กำลังโหลด...' }));
+    const r = await api('adminGetLate', st.token, id, ym.m, ym.y);
+    if (n !== late.req) return;   // คำตอบเก่าที่มาช้า ทิ้ง
+    if (!r.ok) { if (r.code !== 'AUTH') box.replaceChildren(el('p', { class: 'error', text: r.message })); return; }
+    r.records.forEach(x => { late.original[x.day] = true; late.marked[x.day] = true; });
+    r.leaveDays.forEach(d => { late.leave[d] = true; });
+    late.dim = r.daysInMonth;
+    renderLateCalendar();
+  }
+
+  function renderLateCalendar() {
+    const ym = lateYM(), today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const cells = WEEK_TH.map(w => el('div', { class: 'cal-head', text: w }));
+    for (let i = 0; i < new Date(ym.y, ym.m - 1, 1).getDay(); i++) cells.push(el('div', { class: 'cal-blank' }));
+    for (let d = 1; d <= late.dim; d++) {
+      const date = new Date(ym.y, ym.m - 1, d), wd = date.getDay();
+      const onLeave = !!late.leave[d], future = date > today, dis = onLeave || future;
+      const cb = el('input', { type: 'checkbox', 'aria-label': 'มาสาย วันที่ ' + d });
+      cb.checked = !!late.marked[d]; cb.disabled = dis;
+      const cell = el('label', { class: 'cal-day' + (wd === 0 || wd === 6 ? ' we' : '') + (dis ? ' dis' : '') + (onLeave ? ' leave' : '') + (cb.checked ? ' on' : '') },
+        el('span', { class: 'cal-num', text: String(d) }), cb, el('span', { class: 'cal-tag', text: onLeave ? 'ลา' : (future ? '' : 'มาสาย') }));
+      cb.addEventListener('change', () => { late.marked[d] = cb.checked; cell.classList.toggle('on', cb.checked); updateLateInfo(); });
+      cells.push(cell);
+    }
+    $('lateCal').replaceChildren(...cells);
+    updateLateInfo();
+  }
+
+  function updateLateInfo() {
+    const on = Object.keys(late.marked).filter(d => late.marked[d]).map(Number);
+    late.dirty = on.length !== Object.keys(late.original).length || on.some(d => !late.original[d]);
+    $('lateInfo').textContent = $('lateStaff').value ? 'ติ๊กมาสาย ' + on.length + ' วัน' + (late.dirty ? ' (ยังไม่ได้บันทึก)' : '') : '';
+    $('btnLateSave').disabled = !late.dirty;
+  }
+
+  async function onLateChange() {
+    if (late.dirty && !(await confirmBox('ละทิ้งการแก้ไข?', 'มีการติ๊กที่ยังไม่ได้บันทึก ต้องการเปลี่ยนไปดูข้อมูลอื่นหรือไม่?', 'ละทิ้งและเปลี่ยน'))) {
+      $('lateStaff').value = late.prev.s; $('lateMonth').value = late.prev.m; $('lateYear').value = late.prev.y;
+      return;
+    }
+    late.prev = lateSnapshot();
+    loadLateCalendar();
+  }
+
+  async function saveLate() {
+    const id = $('lateStaff').value, ym = lateYM();
+    if (!id || !late.dirty) return;
+    const days = Object.keys(late.marked).filter(d => late.marked[d]).map(Number);
+    await act('adminSaveLateMonth', [st.token, id, ym.m, ym.y, days, $('lateNote').value], () => { $('lateNote').value = ''; loadLateCalendar(); });
+  }
+
+  if ($('btnLateSave')) {   // ผูกเหตุการณ์เมื่อมีแผง "มาสาย" ใน Admin.html แล้วเท่านั้น
+    ['lateStaff', 'lateMonth', 'lateYear'].forEach(id => $(id).addEventListener('change', onLateChange));
+    $('btnLateSave').addEventListener('click', saveLate);
+  }
+
+  // ---------- ผูกเหตุการณ์ ----------
+  $('loginForm').addEventListener('submit', onLogin);
+  $('btnLogout').addEventListener('click', logout);
+  $('btnMyPw').addEventListener('click', changeOwnPassword);
+  $('btnSearch').addEventListener('click', loadLeaves);
+  fillMonthFilter();
+  $('fStatus').addEventListener('change', loadLeaves);
+  $('fMonthM').addEventListener('change', loadLeaves); $('fMonthY').addEventListener('change', loadLeaves);
+  $('fQ').addEventListener('keydown', e => { if (e.key === 'Enter') loadLeaves(); });
+  $('btnAddStaff').addEventListener('click', addStaff);
+  $('btnAddAdmin').addEventListener('click', addAdmin);
+  document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+  document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
