@@ -8,3 +8,4 @@ seed*.sql
 data/
 *.grid.json
 __pycache__/
+!.env.example
