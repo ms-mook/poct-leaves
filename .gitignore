@@ -7,3 +7,4 @@ public/
 seed*.sql
 data/
 *.grid.json
+__pycache__/
